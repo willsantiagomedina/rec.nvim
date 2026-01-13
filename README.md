@@ -88,13 +88,31 @@ EOF
 After installing the plugin, you need to build the Rust CLI backend:
 
 ```bash
-cd ~/.local/share/nvim/lazy/rec.nvim/crates/rec-cli  # adjust path based on your plugin manager
+# Navigate to the plugin directory (path depends on your plugin manager):
+
+# For lazy.nvim:
+cd ~/.local/share/nvim/lazy/rec.nvim/crates/rec-cli
+
+# For packer.nvim:
+cd ~/.local/share/nvim/site/pack/packer/start/rec.nvim/crates/rec-cli
+
+# For vim-plug (Neovim):
+cd ~/.local/share/nvim/plugged/rec.nvim/crates/rec-cli
+
+# For vim-plug (Vim):
+cd ~/.vim/plugged/rec.nvim/crates/rec-cli
+
+# Then build the CLI:
 cargo build --release
 ```
 
 The built binary will be at `target/release/rec-cli` (or `target/debug/rec-cli` for development builds).
 
-> **Note**: You'll need to update the `BIN` path in `lua/rec/cli.lua` or `lua/rec/init.lua` to point to your compiled binary.
+> **Note**: You'll need to update the `BIN` path in `lua/rec/cli.lua` or `lua/rec/init.lua` to point to your compiled binary. For example:
+> ```lua
+> -- In lua/rec/cli.lua
+> local BIN = vim.fn.expand("~/.local/share/nvim/lazy/rec.nvim/crates/rec-cli/target/release/rec-cli")
+> ```
 
 ## Configuration
 
@@ -331,7 +349,9 @@ The `status()` function returns:
 
 1. Check if ffmpeg is installed: `ffmpeg -version`
 2. Verify the `rec-cli` binary is built and accessible
-3. Check ffmpeg logs at `/tmp/rec.nvim.ffmpeg.log`
+3. Check ffmpeg logs (location varies by platform):
+   - **Linux/macOS**: `/tmp/rec.nvim.ffmpeg.log`
+   - **Windows**: Check your temp directory or configure a custom log location
 4. List available devices: `:RecDevices`
 
 ### Permission denied (macOS)
@@ -392,4 +412,6 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 If you encounter issues or have questions:
 - Open an issue on [GitHub](https://github.com/willsantiagomedina/rec.nvim/issues)
-- Check the ffmpeg logs at `/tmp/rec.nvim.ffmpeg.log` for recording errors
+- Check the ffmpeg logs for recording errors:
+  - **Linux/macOS**: `/tmp/rec.nvim.ffmpeg.log`
+  - **Windows**: Check your system temp directory
