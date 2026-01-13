@@ -1,27 +1,75 @@
-use std::fs::{self, File, OpenOptions};
+use chrono::Local;
+use clap::{Parser, Subcommand};
+use dirs::home_dir;
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use dirs::home_dir;
-use nix::sys::signal::{kill, Signal};
-use nix::unistd::Pid;
-
 const PID_FILE: &str = "/tmp/rec.nvim.pid";
 const OUT_FILE: &str = "/tmp/rec.nvim.outpath";
 const LOG_FILE: &str = "/tmp/rec.nvim.ffmpeg.log";
 
-fn default_output_path() -> PathBuf {
-    // Use ~/Movies/rec.nvim.mp4 if possible, otherwise fallback to ~/rec.nvim.mp4
-    let home = home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let movies = home.join("Movies");
-    if movies.exists() {
-        movies.join("rec.nvim.mp4")
-    } else {
-        home.join("rec.nvim.mp4")
-    }
+/*
+  IMPORTANT (macOS avfoundation):
+  From your device list:
+    [4] Capture screen 0
+*/
+const SCREEN_INDEX: &str = "4";
+
+#[derive(Parser, Debug)]
+#[command(name = "rec-cli", version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// List avfoundation devices
+    Devices,
+
+    /// Start recording (optionally cropped)
+    Start {
+        /// Output directory
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+
+        /// Crop X (pixels)
+        #[arg(long)]
+        x: Option<i32>,
+        /// Crop Y (pixels)
+        #[arg(long)]
+        y: Option<i32>,
+        /// Crop width (pixels)
+        #[arg(long)]
+        width: Option<i32>,
+        /// Crop height (pixels)
+        #[arg(long)]
+        height: Option<i32>,
+    },
+
+    /// Stop recording
+Stop {
+    /// Output directory (ignored, for compatibility)
+    #[arg(long)]
+    output_dir: Option<PathBuf>,
+},
+
+
+}
+
+fn write_log(msg: &str) {
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(LOG_FILE)
+        .expect("failed to open log file");
+    let _ = writeln!(f, "{}", msg);
 }
 
 fn ensure_parent_dir(path: &Path) {
@@ -30,169 +78,177 @@ fn ensure_parent_dir(path: &Path) {
     }
 }
 
-fn write_log_header(msg: &str) {
-    let mut f = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(LOG_FILE)
-        .expect("failed to open log file");
-    let _ = writeln!(f, "\n===== {} =====", msg);
-}
-
 fn read_pid() -> Option<i32> {
-    fs::read_to_string(PID_FILE).ok()?.trim().parse::<i32>().ok()
+    fs::read_to_string(PID_FILE).ok()?.trim().parse().ok()
 }
 
-fn pid_is_alive(pid: i32) -> bool {
-    // kill(pid, None) is a standard "exists?" check on Unix
+fn pid_alive(pid: i32) -> bool {
     kill(Pid::from_raw(pid), None).is_ok()
 }
 
-fn cmd_devices() {
-    // This prints avfoundation device list into your terminal (not Neovim notify)
-    // Useful to find the correct screen index: "Capture screen 0"
-    let mut c = Command::new("ffmpeg");
-    c.args(["-f", "avfoundation", "-list_devices", "true", "-i", ""]);
-    c.stdout(Stdio::inherit());
-    c.stderr(Stdio::inherit());
-
-    let status = c.status().expect("failed to run ffmpeg device listing");
-    if !status.success() {
-        eprintln!("ffmpeg device listing exited non-zero");
-    }
+fn default_output_dir() -> PathBuf {
+    let home = home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join("Videos").join("nvim-recordings")
 }
 
-fn cmd_start(device: &str, out: Option<PathBuf>) {
+fn next_output_file(dir: &Path) -> PathBuf {
+    let ts = Local::now().format("%Y%m%d_%H%M%S");
+    dir.join(format!("rec_{}.mp4", ts))
+}
+
+fn cmd_devices() -> anyhow::Result<()> {
+    let status = Command::new("ffmpeg")
+        .args(["-f", "avfoundation", "-list_devices", "true", "-i", ""])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()?;
+
+    if !status.success() {
+        eprintln!("ffmpeg device listing failed");
+    }
+    Ok(())
+}
+
+fn cmd_start(
+    output_dir: Option<PathBuf>,
+    x: Option<i32>,
+    y: Option<i32>,
+    width: Option<i32>,
+    height: Option<i32>,
+) -> anyhow::Result<()> {
     if let Some(pid) = read_pid() {
-        if pid_is_alive(pid) {
+        if pid_alive(pid) {
             println!("REC_ALREADY_RUNNING");
-            return;
-        } else {
-            // stale pid file
-            let _ = fs::remove_file(PID_FILE);
+            return Ok(());
         }
+        let _ = fs::remove_file(PID_FILE);
     }
 
-    let output = out.unwrap_or_else(default_output_path);
+    let dir = output_dir.unwrap_or_else(default_output_dir);
+    fs::create_dir_all(&dir)?;
+    let output = next_output_file(&dir);
     ensure_parent_dir(&output);
 
-    // Persist output path so stop knows where to look
-    let _ = fs::write(OUT_FILE, output.to_string_lossy().to_string());
+    fs::write(OUT_FILE, output.to_string_lossy().to_string())?;
 
-    // Fresh log header
-    write_log_header(&format!("START (device={}, output={})", device, output.display()));
+    let input = format!("{}:none", SCREEN_INDEX);
 
-    // Log file for ffmpeg stderr (THIS IS HOW WE SEE REAL ERRORS)
-    let log = File::create(LOG_FILE).expect("failed to create ffmpeg log");
+    write_log("===== START =====");
+    write_log(&format!("Input: {}", input));
+    write_log(&format!("Output: {}", output.display()));
 
-    // IMPORTANT: macOS avfoundation expects "<video>:<audio>"
-    // For screen capture: "<screen_index>:none"
-    let input = format!("{}:none", device);
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(LOG_FILE)?;
 
-    let child = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-f",
-            "avfoundation",
-            "-framerate",
-            "30",
-            "-i",
-            &input,
-            "-pix_fmt",
-            "yuv420p",
-            output.to_str().unwrap(),
-        ])
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args([
+        "-y",
+
+        // video input
+        "-f", "avfoundation",
+        "-framerate", "30",
+        "-i", &input,
+
+        // silent audio (QuickTime REQUIRES this)
+        "-f", "lavfi",
+        "-i", "anullsrc",
+
+        // QuickTime-safe encoding
+        "-pix_fmt", "yuv420p",
+        "-profile:v", "high",
+        "-level", "4.2",
+        "-movflags", "+faststart",
+
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "23",
+
+        // stop audio when video ends
+        "-shortest",
+    ]);
+
+    // Apply crop only if all values exist (RecWin)
+    if let (Some(x), Some(y), Some(w), Some(h)) = (x, y, width, height) {
+        let filter = format!("crop={}:{}:{}:{}", w, h, x, y);
+        write_log(&format!("Crop filter: {}", filter));
+        cmd.args(["-filter:v", &filter]);
+    }
+
+    cmd.arg(&output)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(log)
-        .spawn()
-        .expect("failed to start ffmpeg");
+        .stderr(log);
 
+    let child = cmd.spawn()?;
     let pid = child.id() as i32;
-    fs::write(PID_FILE, pid.to_string()).expect("failed to write pid file");
+    fs::write(PID_FILE, pid.to_string())?;
 
-    println!("REC_START_OK");
+    // give ffmpeg time to crash if misconfigured
+    thread::sleep(Duration::from_millis(400));
+    if !pid_alive(pid) {
+        println!("REC_START_ERR");
+        println!("ffmpeg exited immediately");
+        println!("Log: {}", LOG_FILE);
+        return Ok(());
+    }
+
+    println!("Recording started");
+    println!("Output: {}", output.display());
+    Ok(())
 }
 
-fn cmd_stop() {
+fn cmd_stop() -> anyhow::Result<()> {
     let pid = match read_pid() {
-        Some(pid) => pid,
+        Some(p) => p,
         None => {
             println!("REC_NOT_RUNNING");
-            return;
+            return Ok(());
         }
     };
 
-    write_log_header(&format!("STOP (pid={})", pid));
-
-    // Send SIGINT to finalize MP4
+    write_log("===== STOP =====");
     let _ = kill(Pid::from_raw(pid), Signal::SIGINT);
 
-    // Wait for process to exit (MP4 finalizes on shutdown)
-    // up to ~5 seconds
     for _ in 0..50 {
-        if !pid_is_alive(pid) {
+        if !pid_alive(pid) {
             break;
         }
         thread::sleep(Duration::from_millis(100));
     }
 
-    // Cleanup pid file regardless
     let _ = fs::remove_file(PID_FILE);
 
-    // Determine output path from OUT_FILE
-    let out_path = fs::read_to_string(OUT_FILE)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| default_output_path().to_string_lossy().to_string());
+    let out_path = fs::read_to_string(OUT_FILE).unwrap_or_default();
+    let out = PathBuf::from(out_path.trim());
 
-    let out = PathBuf::from(out_path);
-
-    // Give filesystem a moment (sometimes ffmpeg flushes right after exit)
+    // wait for mp4 to finalize
     for _ in 0..30 {
         if out.exists() && out.metadata().map(|m| m.len()).unwrap_or(0) > 0 {
-            println!("REC_STOP_OK");
-            println!("Saved to {}", out.display());
-            return;
+            println!("Recording stopped");
+            println!("Recording saved: {}", out.display());
+            return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
     }
 
-    // If we got here: file didn't appear
-    // The ffmpeg log will explain why (permissions, wrong device index, etc.)
     println!("REC_STOP_ERR");
     println!("Check log: {}", LOG_FILE);
+    Ok(())
 }
 
-fn print_usage() {
-    eprintln!(
-        "usage:
-  rec-cli devices
-  rec-cli start <screen_index> [output_path]
-  rec-cli stop
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
 
-notes:
-  - On macOS, list devices first:
-      rec-cli devices
-    Look for: 'Capture screen 0' (or 1, 2...)
-  - ffmpeg errors are logged to:
-      /tmp/rec.nvim.ffmpeg.log
-"
-    );
-}
-
-fn main() {
-    let mut args = std::env::args().skip(1);
-
-    match args.next().as_deref() {
-        Some("devices") => cmd_devices(),
-        Some("start") => {
-let device = args.next().unwrap_or_else(|| "4".to_string());
-            let out = args.next().map(PathBuf::from);
-            cmd_start(&device, out);
+    match cli.command {
+        Commands::Devices => cmd_devices()?,
+        Commands::Start { output_dir, x, y, width, height } => {
+            cmd_start(output_dir, x, y, width, height)?
         }
-        Some("stop") => cmd_stop(),
-        _ => print_usage(),
+Commands::Stop { .. } => cmd_stop()?,
     }
+
+    Ok(())
 }
 

@@ -2,6 +2,7 @@ local M = {}
 local config = require("rec.config")
 local keys = require("rec.keys")
 local geometry = require("rec.geometry")
+local storage = require("rec.storage")
 local dashboard = require("rec.dashboard")
 
 -- 🔧 absolute path (DO NOT RELY ON $PATH)
@@ -17,6 +18,7 @@ local state = {
 	recording_mode = nil, -- "fullscreen" or "window"
 	capture_geometry = nil, -- For window recordings
 	job_id = nil, -- Track the rec-cli job
+	output_file = nil, -- Track the output file path for this session
 
 	hud_win = nil,
 	hud_buf = nil,
@@ -169,6 +171,73 @@ local function close_windows()
 	state.keys_buf = nil
 end
 
+local function get_yabai_window_frame()
+	if vim.fn.executable("yabai") ~= 1 then
+		return nil, "yabai not found"
+	end
+
+	local out = vim.fn.system({ "yabai", "-m", "query", "--windows", "--window" })
+	if vim.v.shell_error ~= 0 then
+		return nil, "yabai query failed"
+	end
+
+	local ok, data = pcall(vim.json.decode, out)
+	if not ok or not data or not data.frame then
+		return nil, "invalid yabai json"
+	end
+
+	local f = data.frame
+	return {
+		x = math.floor(f.x),
+		y = math.floor(f.y),
+		width = math.floor(f.w),
+		height = math.floor(f.h),
+	}
+end
+
+function M.win()
+	if state.running then
+		notify("Already recording", vim.log.levels.WARN)
+		return
+	end
+
+	local frame, err = get_yabai_window_frame()
+	if not frame then
+		notify("RecWin failed: " .. (err or "unknown"), vim.log.levels.ERROR)
+		return
+	end
+
+	-- mark mode for dashboard/metadata (if you store it)
+	state.running = true
+	state.mode = "window"
+	state.start_time = os.time()
+
+	-- call rec-cli with crop args
+	run({
+		"start",
+		"--output-dir",
+		config.options.recording.output_dir,
+		"--x",
+		tostring(frame.x),
+		"--y",
+		tostring(frame.y),
+		"--width",
+		tostring(frame.width),
+		"--height",
+		tostring(frame.height),
+	})
+
+	open_hud()
+	open_keys()
+
+	state.timer = vim.loop.new_timer()
+	state.timer:start(0, 1000, vim.schedule_wrap(update_hud))
+
+	vim.on_key(on_key, state.key_ns)
+
+	notify("REC_START_OK (window)")
+end
+
 -- ---------- HUD update ----------
 
 local function update_hud()
@@ -253,9 +322,12 @@ local function run(args, geometry_args)
 
 	-- Add output directory to args if specified
 	local cli_args = vim.list_extend({ REC_CLI }, args)
+
+	local output_dir = config.get_output_dir()
+
 	if config.options.recording.output_dir then
 		table.insert(cli_args, "--output-dir")
-		table.insert(cli_args, config.get_output_dir())
+		table.insert(cli_args, output_dir)
 	end
 
 	-- Add geometry args if provided (for window recording)
@@ -278,6 +350,12 @@ local function run(args, geometry_args)
 			if data then
 				for _, line in ipairs(data) do
 					if line ~= "" then
+						-- Check if rec-cli outputs the filename
+						-- Expected format: "Recording saved: /path/to/file.mp4"
+						local filepath = line:match("Recording saved: (.+)")
+						if filepath then
+							state.output_file = filepath
+						end
 						notify(line)
 					end
 				end
@@ -490,22 +568,17 @@ function M.stop()
 		state.timer = nil
 	end
 
-if state.hud_win and vim.api.nvim_win_is_valid(state.hud_win) then
-		vim.api.nvim_win_close(state.hud_win, true)
-		state.hud_win = nil
-	end
-
-if state.hud_buf and vim.api.nvim_buf_is_valid(state.hud_buf) then
-		vim.api.nvim_buf_delete(state.hud_buf, {force=true})
-		state.hud_buf = nil
-	end
-
-vim.on_key(nil, state.key_ns)
-
 	vim.on_key(nil, state.key_ns)
 	close_windows()
 
 	local mode = state.recording_mode or "unknown"
+	local output_file = state.output_file
+
+	-- Calculate actual recording duration (excluding paused time)
+	local duration = nil
+	if state.start_time then
+		duration = os.time() - state.start_time - state.total_paused_duration
+	end
 
 	state.running = false
 	state.paused = false
@@ -515,27 +588,61 @@ vim.on_key(nil, state.key_ns)
 	state.pause_time = nil
 	state.total_paused_duration = 0
 	state.job_id = nil
+	state.output_file = nil
 	state.keys = {}
 
 	keys.reset() -- Clean up keys state
 
 	notify(string.format("REC_STOP_OK (%s)", mode))
 
-    -- Persist the recording after stop
-    local time = os.date("!%Y-%m-%dT%H:%M:%S", os.time())
-    local filename = string.format("recording_%s.mp4", time)
-    storage.add_recording({
-        filename = filename,
-        absolute_path = config.get_output_dir() .. "/" .. filename,
-        created_at = os.time()
-    })
+	-- Persist recording metadata
+	vim.defer_fn(function()
+		-- If output_file wasn't set, try to find the latest file
+		if not output_file then
+			local output_dir = config.get_output_dir()
 
-	-- Auto-open video if configured
-	if config.options.recording.auto_open then
-		vim.defer_fn(function()
-			M.open_latest()
-		end, 500) -- Small delay to ensure file is written
-	end
+			-- Find the most recent .mp4 file
+			local files = vim.fn.globpath(output_dir, "*.mp4", false, true)
+
+			if #files > 0 then
+				-- Sort by modification time
+				table.sort(files, function(a, b)
+					local stat_a = vim.loop.fs_stat(a)
+					local stat_b = vim.loop.fs_stat(b)
+					if stat_a and stat_b then
+						return stat_a.mtime.sec > stat_b.mtime.sec
+					end
+					return false
+				end)
+
+				output_file = files[1]
+				notify("Detected recording file: " .. vim.fn.fnamemodify(output_file, ":t"), vim.log.levels.INFO)
+			end
+		end
+
+		if output_file then
+			local success = storage.add_recording(output_file, mode, duration)
+			if success then
+				vim.notify("Recording saved to dashboard", vim.log.levels.INFO, { title = "rec.nvim" })
+			else
+				vim.notify(
+					"Warning: Recording file exists but metadata not persisted",
+					vim.log.levels.WARN,
+					{ title = "rec.nvim" }
+				)
+				vim.notify("File: " .. output_file, vim.log.levels.WARN, { title = "rec.nvim" })
+			end
+
+			-- Auto-open if configured
+			if config.options.recording.auto_open then
+				vim.defer_fn(function()
+					M.open_latest()
+				end, 200)
+			end
+		else
+			vim.notify("Warning: Could not locate recording file", vim.log.levels.WARN, { title = "rec.nvim" })
+		end
+	end, 1000) -- Increased delay to ensure file is written
 end
 
 -- ---------- statusline ----------
@@ -547,21 +654,17 @@ end
 -- ---------- video opener ----------
 
 function M.open_latest()
-	local output_dir = config.get_output_dir()
+	local latest = storage.get_latest()
 
-	-- Find latest video file
-	local handle = io.popen(string.format('ls -t "%s"/*.mp4 2>/dev/null | head -1', output_dir))
-
-	if not handle then
-		notify("Could not find recordings", vim.log.levels.WARN)
+	if not latest then
+		notify("No recordings found", vim.log.levels.WARN)
 		return
 	end
 
-	local latest = handle:read("*l")
-	handle:close()
-
-	if not latest or latest == "" then
-		notify("No recordings found in " .. output_dir, vim.log.levels.WARN)
+	-- Verify file exists
+	local stat = vim.loop.fs_stat(latest.path)
+	if not stat then
+		notify("Recording file not found: " .. latest.path, vim.log.levels.ERROR)
 		return
 	end
 
@@ -583,8 +686,10 @@ function M.open_latest()
 	end
 
 	-- Open video
-	vim.fn.jobstart({ open_cmd, latest }, { detach = true })
-	notify("Opening: " .. vim.fn.fnamemodify(latest, ":t"))
+	vim.fn.jobstart({ open_cmd, latest.path }, { detach = true })
+
+	local filename = vim.fn.fnamemodify(latest.path, ":t")
+	notify("Opening: " .. filename)
 end
 
 function M.setup(opts)
@@ -599,6 +704,56 @@ function M.setup(opts)
 	vim.api.nvim_create_user_command("RecStop", M.stop, { desc = "Stop recording" })
 	vim.api.nvim_create_user_command("RecOpen", M.open_latest, { desc = "Open latest recording" })
 	vim.api.nvim_create_user_command("RecDashboard", dashboard.toggle, { desc = "Toggle recordings dashboard" })
+	vim.api.nvim_create_user_command("RecDebug", function()
+		local output_dir = config.get_output_dir()
+		local metadata_path = output_dir .. "/.rec_metadata.json"
+
+		-- Check output directory
+		local dir_exists = vim.fn.isdirectory(output_dir) == 1
+
+		-- Check metadata file
+		local metadata_stat = vim.loop.fs_stat(metadata_path)
+
+		-- List video files
+		local files = vim.fn.globpath(output_dir, "*.mp4", false, true)
+
+		-- Load recordings
+		local recordings = storage.get_all_sorted()
+
+		local info = string.format(
+			[[
+rec.nvim Debug Info
+===================
+
+Output Directory: %s
+Directory exists: %s
+
+Metadata file: %s
+Metadata exists: %s
+
+Video files found: %d
+Recordings in metadata: %d
+
+Current state:
+  Running: %s
+  Output file: %s
+]],
+			output_dir,
+			dir_exists and "YES" or "NO",
+			metadata_path,
+			metadata_stat and "YES" or "NO",
+			#files,
+			#recordings,
+			state.running and "YES" or "NO",
+			state.output_file or "nil"
+		)
+
+		vim.notify(info, vim.log.levels.INFO, { title = "rec.nvim Debug" })
+
+		-- Also print to messages
+		print(info)
+	end, { desc = "Show debug information" })
+
 	vim.api.nvim_create_user_command("RecCalibrate", function()
 		local w, h = geometry.calibrate_cell_size()
 		vim.notify(

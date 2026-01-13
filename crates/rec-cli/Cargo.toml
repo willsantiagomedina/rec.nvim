@@ -18,6 +18,11 @@ dirs = "5.0"
 # Unix signals (SIGINT) — required for macOS/Linux so ffmpeg flushes MP4
 nix = { version = "0.27", features = ["signal"] }
 
+clap = { version = "4", features = ["derive"] }
+chrono = "0.4"
+anyhow = "1"
+libc = "0.2"
+
 [profile.release]
 opt-level = 3
 lto = true

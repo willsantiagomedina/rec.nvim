@@ -1,0 +1,415 @@
+local M = {}
+
+local storage = require("rec.storage")
+local config = require("rec.config")
+
+-- Dashboard state
+local state = {
+	buf = nil,
+	win = nil,
+	recordings = {},
+	selected_idx = 1,
+}
+
+---Format timestamp as human-readable date
+---@param timestamp number Unix timestamp
+---@return string
+local function format_date(timestamp)
+	return os.date("%Y-%m-%d %H:%M:%S", timestamp)
+end
+
+---Expand ~ and make absolute paths consistent
+---@param p string
+---@return string
+local function normalize_path(p)
+	if not p or p == "" then
+		return ""
+	end
+	return vim.fn.fnamemodify(vim.fn.expand(p), ":p")
+end
+
+---Default output dir used by rec-cli (match backend)
+---@return string
+local function default_output_dir()
+	local home = vim.loop.os_homedir() or "~"
+	return normalize_path(home .. "/Videos/nvim-recordings")
+end
+
+---Scan output directory for mp4 files (fallback when metadata is missing)
+---@return table[]
+local function scan_recordings_dir()
+	local dir = config.options and config.options.recording and config.options.recording.output_dir
+		or default_output_dir()
+
+	dir = normalize_path(dir)
+	if dir == "" then
+		return {}
+	end
+
+	local files = vim.fn.globpath(dir, "*.mp4", false, true) or {}
+	local out = {}
+
+	for _, path in ipairs(files) do
+		local p = normalize_path(path)
+		local st = vim.loop.fs_stat(p)
+		if st then
+			table.insert(out, {
+				path = p,
+				timestamp = st.mtime.sec or os.time(),
+				mode = "fullscreen",
+			})
+		end
+	end
+
+	table.sort(out, function(a, b)
+		return (a.timestamp or 0) > (b.timestamp or 0)
+	end)
+
+	return out
+end
+
+---Load recordings: prefer metadata, fallback to disk scan, and prune missing
+---@return table[]
+local function load_recordings()
+	local recs = storage.get_all_sorted() or {}
+
+	-- normalize + prune missing
+	local filtered = {}
+	for _, rec in ipairs(recs) do
+		if rec and rec.path then
+			rec.path = normalize_path(rec.path)
+			local st = vim.loop.fs_stat(rec.path)
+			if st then
+				-- If storage timestamp missing, derive from mtime
+				rec.timestamp = rec.timestamp or (st.mtime.sec or os.time())
+				rec.mode = rec.mode or "fullscreen"
+				table.insert(filtered, rec)
+			end
+		end
+	end
+
+	if #filtered > 0 then
+		table.sort(filtered, function(a, b)
+			return (a.timestamp or 0) > (b.timestamp or 0)
+		end)
+		return filtered
+	end
+
+	-- No metadata or all stale -> fallback to scanning directory
+	return scan_recordings_dir()
+end
+
+---Build the dashboard content lines
+---@return string[]
+local function build_content()
+	local lines = {}
+
+	-- Header
+	table.insert(lines, "")
+	table.insert(
+		lines,
+		"  ╭────────────────────────────────────────────────────────────────╮"
+	)
+	table.insert(lines, "  │                 📹 REC.NVIM RECORDINGS                         │")
+	table.insert(
+		lines,
+		"  ╰────────────────────────────────────────────────────────────────╯"
+	)
+	table.insert(lines, "")
+
+	-- Stats
+	local count = #state.recordings
+	table.insert(lines, string.format("  Total recordings: %d", count))
+	table.insert(lines, "")
+	table.insert(
+		lines,
+		"  ────────────────────────────────────────────────────────────────"
+	)
+	table.insert(lines, "")
+
+	-- Recordings list
+	if count == 0 then
+		table.insert(lines, "")
+		table.insert(lines, "                   No recordings found")
+		table.insert(lines, "")
+		table.insert(lines, "         Start recording with :RecStart or :RecWin")
+		table.insert(lines, "")
+	else
+		for i, rec in ipairs(state.recordings) do
+			local is_selected = i == state.selected_idx
+			local prefix = is_selected and "  ▶ " or "    "
+
+			local filename = vim.fn.fnamemodify(rec.path, ":t")
+			local date = format_date(rec.timestamp or os.time())
+			local mode_str = (rec.mode == "window") and "[WIN]" or "[FULL]"
+
+			table.insert(lines, string.format("%s%s %s", prefix, mode_str, filename))
+			table.insert(lines, string.format("     %s", date))
+			table.insert(lines, string.format("     %s", rec.path))
+
+			if i < count then
+				table.insert(lines, "")
+			end
+		end
+	end
+
+	-- Footer
+	table.insert(lines, "")
+	table.insert(
+		lines,
+		"  ────────────────────────────────────────────────────────────────"
+	)
+	table.insert(lines, "")
+	table.insert(lines, "  Controls: <Enter> Open  •  d Delete  •  q Quit")
+	table.insert(lines, "")
+
+	return lines
+end
+
+---Refresh the dashboard display
+local function refresh()
+	if not (state.buf and vim.api.nvim_buf_is_valid(state.buf)) then
+		return
+	end
+
+	state.recordings = load_recordings()
+
+	if #state.recordings > 0 then
+		if state.selected_idx > #state.recordings then
+			state.selected_idx = #state.recordings
+		end
+		if state.selected_idx < 1 then
+			state.selected_idx = 1
+		end
+	else
+		state.selected_idx = 1
+	end
+
+	local lines = build_content()
+
+	vim.api.nvim_buf_set_option(state.buf, "modifiable", true)
+	vim.api.nvim_buf_set_lines(state.buf, 0, -1, false, lines)
+	vim.api.nvim_buf_set_option(state.buf, "modifiable", false)
+
+	for i, line in ipairs(lines) do
+		local lnum = i - 1
+
+		if line:match("^  ▶") then
+			vim.api.nvim_buf_add_highlight(state.buf, -1, "RecDashboardSelected", lnum, 0, -1)
+		end
+
+		if line:match("%[WIN%]") or line:match("%[FULL%]") then
+			local s, e = line:find("%[.-%]")
+			if s then
+				vim.api.nvim_buf_add_highlight(state.buf, -1, "RecDashboardMode", lnum, s - 1, e)
+			end
+		end
+
+		if line:match("^     %d%d%d%d%-%d%d%-%d%d") then
+			vim.api.nvim_buf_add_highlight(state.buf, -1, "RecDashboardDate", lnum, 0, -1)
+		end
+
+		if line:match("^     /") or line:match("^     ~") then
+			vim.api.nvim_buf_add_highlight(state.buf, -1, "RecDashboardPath", lnum, 0, -1)
+		end
+
+		if line:match("^  [╭│╰]") or line:match("^  ──") then
+			vim.api.nvim_buf_add_highlight(state.buf, -1, "RecDashboardBorder", lnum, 0, -1)
+		end
+
+		if line:match("REC.NVIM") then
+			vim.api.nvim_buf_add_highlight(state.buf, -1, "RecDashboardTitle", lnum, 0, -1)
+		end
+	end
+end
+
+---@return table|nil
+local function get_selected()
+	if #state.recordings == 0 then
+		return nil
+	end
+	if state.selected_idx > 0 and state.selected_idx <= #state.recordings then
+		return state.recordings[state.selected_idx]
+	end
+	return nil
+end
+
+local function open_recording()
+	local rec = get_selected()
+	if not rec then
+		return
+	end
+
+	rec.path = normalize_path(rec.path)
+	local stat = vim.loop.fs_stat(rec.path)
+	if not stat then
+		vim.notify("File not found: " .. rec.path, vim.log.levels.ERROR, { title = "rec.nvim" })
+		refresh()
+		return
+	end
+
+	local open_cmd = config.options.recording.open_command
+	if not open_cmd then
+		if vim.fn.has("mac") == 1 then
+			open_cmd = "open"
+		elseif vim.fn.has("unix") == 1 then
+			open_cmd = "xdg-open"
+		elseif vim.fn.has("win32") == 1 then
+			open_cmd = "start"
+		else
+			vim.notify("No video player configured", vim.log.levels.ERROR, { title = "rec.nvim" })
+			return
+		end
+	end
+
+	vim.fn.jobstart({ open_cmd, rec.path }, { detach = true })
+	vim.notify("Opening: " .. vim.fn.fnamemodify(rec.path, ":t"), vim.log.levels.INFO, { title = "rec.nvim" })
+end
+
+local function delete_recording()
+	local rec = get_selected()
+	if not rec then
+		return
+	end
+
+	rec.path = normalize_path(rec.path)
+	local filename = vim.fn.fnamemodify(rec.path, ":t")
+
+	local choice = vim.fn.confirm(string.format("Delete '%s'?", filename), "&Yes\n&No", 2)
+	if choice ~= 1 then
+		return
+	end
+
+	local success = storage.delete_recording(rec.path)
+	if success then
+		vim.notify("Deleted: " .. filename, vim.log.levels.INFO, { title = "rec.nvim" })
+		refresh()
+	else
+		vim.notify("Failed to delete: " .. filename, vim.log.levels.ERROR, { title = "rec.nvim" })
+	end
+end
+
+local function setup_keymaps()
+	if not state.buf then
+		return
+	end
+
+	local opts = { buffer = state.buf, noremap = true, silent = true }
+
+	vim.keymap.set("n", "j", function()
+		if state.selected_idx < #state.recordings then
+			state.selected_idx = state.selected_idx + 1
+			refresh()
+		end
+	end, opts)
+
+	vim.keymap.set("n", "k", function()
+		if state.selected_idx > 1 then
+			state.selected_idx = state.selected_idx - 1
+			refresh()
+		end
+	end, opts)
+
+	vim.keymap.set("n", "<Down>", function()
+		if state.selected_idx < #state.recordings then
+			state.selected_idx = state.selected_idx + 1
+			refresh()
+		end
+	end, opts)
+
+	vim.keymap.set("n", "<Up>", function()
+		if state.selected_idx > 1 then
+			state.selected_idx = state.selected_idx - 1
+			refresh()
+		end
+	end, opts)
+
+	vim.keymap.set("n", "<CR>", open_recording, opts)
+	vim.keymap.set("n", "d", delete_recording, opts)
+
+	vim.keymap.set("n", "q", function()
+		M.close()
+	end, opts)
+
+	vim.keymap.set("n", "<Esc>", function()
+		M.close()
+	end, opts)
+end
+
+local function setup_highlights()
+	vim.api.nvim_set_hl(0, "RecDashboardBorder", { fg = "#3b82f6" })
+	vim.api.nvim_set_hl(0, "RecDashboardTitle", { fg = "#60a5fa", bold = true })
+	vim.api.nvim_set_hl(0, "RecDashboardSelected", { fg = "#fbbf24", bold = true })
+	vim.api.nvim_set_hl(0, "RecDashboardMode", { fg = "#10b981" })
+	vim.api.nvim_set_hl(0, "RecDashboardDate", { fg = "#9ca3af" })
+	vim.api.nvim_set_hl(0, "RecDashboardPath", { fg = "#6b7280" })
+end
+
+function M.open()
+	if state.win and vim.api.nvim_win_is_valid(state.win) then
+		M.close()
+		return
+	end
+
+	setup_highlights()
+	state.selected_idx = 1
+
+	state.buf = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_option(state.buf, "bufhidden", "wipe")
+	vim.api.nvim_buf_set_option(state.buf, "buftype", "nofile")
+	vim.api.nvim_buf_set_option(state.buf, "swapfile", false)
+	vim.api.nvim_buf_set_option(state.buf, "filetype", "rec-dashboard")
+	vim.api.nvim_buf_set_option(state.buf, "modifiable", false)
+
+	refresh()
+
+	local width = math.floor(vim.o.columns * 0.7)
+	local height = math.floor(vim.o.lines * 0.7)
+	if width < 60 then
+		width = 60
+	end
+	if height < 20 then
+		height = 20
+	end
+
+	local row = math.floor((vim.o.lines - height) / 2)
+	local col = math.floor((vim.o.columns - width) / 2)
+
+	state.win = vim.api.nvim_open_win(state.buf, true, {
+		relative = "editor",
+		row = row,
+		col = col,
+		width = width,
+		height = height,
+		style = "minimal",
+		border = "rounded",
+	})
+
+	vim.api.nvim_win_set_option(state.win, "cursorline", false)
+	vim.api.nvim_win_set_option(state.win, "number", false)
+	vim.api.nvim_win_set_option(state.win, "relativenumber", false)
+	vim.api.nvim_win_set_option(state.win, "wrap", false)
+
+	setup_keymaps()
+end
+
+function M.close()
+	if state.win and vim.api.nvim_win_is_valid(state.win) then
+		vim.api.nvim_win_close(state.win, true)
+	end
+	if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
+		vim.api.nvim_buf_delete(state.buf, { force = true })
+	end
+	state.win = nil
+	state.buf = nil
+end
+
+function M.toggle()
+	if state.win and vim.api.nvim_win_is_valid(state.win) then
+		M.close()
+	else
+		M.open()
+	end
+end
+
+return M
