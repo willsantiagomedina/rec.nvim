@@ -1,14 +1,21 @@
 local M = {}
 
--- 🔧 CHANGE ONLY IF YOU MOVE THE BINARY
+-- 🔧 absolute path (DO NOT RELY ON $PATH)
 local REC_CLI = vim.fn.expand("~/dev/rec.nvim/crates/rec-cli/target/debug/rec-cli")
 
 local state = {
 	running = false,
 	start_time = nil,
 	timer = nil,
-	win = nil,
-	buf = nil,
+
+	hud_win = nil,
+	hud_buf = nil,
+
+	keys_win = nil,
+	keys_buf = nil,
+	keys = {},
+
+	key_ns = vim.api.nvim_create_namespace("rec.nvim.keys"),
 }
 
 -- ---------- utils ----------
@@ -31,50 +38,99 @@ local function format_time(sec)
 	return string.format("%02d:%02d", m, s)
 end
 
--- ---------- floating window ----------
+-- ---------- floating windows ----------
 
-local function open_float(text)
-	if state.win and vim.api.nvim_win_is_valid(state.win) then
-		return
-	end
+local function open_hud()
+	state.hud_buf = vim.api.nvim_create_buf(false, true)
 
-	state.buf = vim.api.nvim_create_buf(false, true)
-
-	vim.api.nvim_buf_set_lines(state.buf, 0, -1, false, text)
-
-	local width = 20
-	local height = 3
-
-	state.win = vim.api.nvim_open_win(state.buf, false, {
+	state.hud_win = vim.api.nvim_open_win(state.hud_buf, false, {
 		relative = "editor",
 		anchor = "NE",
 		row = 1,
 		col = vim.o.columns - 2,
-		width = width,
-		height = height,
+		width = 18,
+		height = 3,
 		style = "minimal",
 		border = "rounded",
 	})
 end
 
-local function update_float()
-	if not (state.buf and vim.api.nvim_buf_is_valid(state.buf)) then
+local function open_keys()
+	state.keys_buf = vim.api.nvim_create_buf(false, true)
+
+	state.keys_win = vim.api.nvim_open_win(state.keys_buf, false, {
+		relative = "editor",
+		anchor = "NE",
+		row = 5,
+		col = vim.o.columns - 2,
+		width = 30,
+		height = 4,
+		style = "minimal",
+		border = "rounded",
+	})
+end
+
+local function close_windows()
+	for _, win in ipairs({ state.hud_win, state.keys_win }) do
+		if win and vim.api.nvim_win_is_valid(win) then
+			vim.api.nvim_win_close(win, true)
+		end
+	end
+
+	state.hud_win = nil
+	state.hud_buf = nil
+	state.keys_win = nil
+	state.keys_buf = nil
+end
+
+-- ---------- HUD update ----------
+
+local function update_hud()
+	if not (state.hud_buf and vim.api.nvim_buf_is_valid(state.hud_buf)) then
 		return
 	end
 
 	local elapsed = os.time() - state.start_time
-	vim.api.nvim_buf_set_lines(state.buf, 0, -1, false, {
+
+	vim.api.nvim_buf_set_lines(state.hud_buf, 0, -1, false, {
 		"🔴 REC",
 		format_time(elapsed),
 	})
 end
 
-local function close_float()
-	if state.win and vim.api.nvim_win_is_valid(state.win) then
-		vim.api.nvim_win_close(state.win, true)
+-- ---------- keystroke capture ----------
+
+local function redraw_keys()
+	if not (state.keys_buf and vim.api.nvim_buf_is_valid(state.keys_buf)) then
+		return
 	end
-	state.win = nil
-	state.buf = nil
+
+	vim.api.nvim_buf_set_lines(state.keys_buf, 0, -1, false, {
+		"⌨ Keystrokes",
+		table.concat(state.keys, " "),
+	})
+end
+
+local function on_key(key)
+	if not state.running then
+		return
+	end
+
+	local k = vim.fn.keytrans(key)
+
+	-- filter junk
+	if k == "<Ignore>" or k == "" then
+		return
+	end
+
+	table.insert(state.keys, k)
+
+	-- keep last ~20 keys
+	if #state.keys > 20 then
+		table.remove(state.keys, 1)
+	end
+
+	redraw_keys()
 end
 
 -- ---------- rust runner ----------
@@ -122,11 +178,15 @@ function M.start()
 
 	state.running = true
 	state.start_time = os.time()
+	state.keys = {}
 
-	open_float({ "🔴 REC", "00:00" })
+	open_hud()
+	open_keys()
 
 	state.timer = vim.loop.new_timer()
-	state.timer:start(0, 1000, vim.schedule_wrap(update_float))
+	state.timer:start(0, 1000, vim.schedule_wrap(update_hud))
+
+	vim.on_key(on_key, state.key_ns)
 
 	notify("REC_START_OK")
 end
@@ -145,10 +205,12 @@ function M.stop()
 		state.timer = nil
 	end
 
-	close_float()
+	vim.on_key(nil, state.key_ns)
+	close_windows()
 
 	state.running = false
 	state.start_time = nil
+	state.keys = {}
 
 	notify("REC_STOP_OK")
 end
