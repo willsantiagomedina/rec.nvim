@@ -1,4 +1,6 @@
 local M = {}
+local config = require("rec.config")
+local keys = require("rec.keys")
 
 -- 🔧 absolute path (DO NOT RELY ON $PATH)
 local REC_CLI = vim.fn.expand("~/dev/rec.nvim/crates/rec-cli/target/debug/rec-cli")
@@ -17,6 +19,14 @@ local state = {
 
 	key_ns = vim.api.nvim_create_namespace("rec.nvim.keys"),
 }
+
+vim.api.nvim_set_hl(0, "RecKeysBorder", { fg = "#5fd7ff" })
+vim.api.nvim_set_hl(0, "RecKeysBg", { bg = "#0b1220" })
+vim.api.nvim_set_hl(0, "RecKeysText", {
+	fg = "#ffffff",
+	bg = "#0b1220",
+	bold = true,
+})
 
 -- ---------- utils ----------
 
@@ -48,26 +58,88 @@ local function open_hud()
 		anchor = "NE",
 		row = 1,
 		col = vim.o.columns - 2,
-		width = 18,
-		height = 3,
-		style = "minimal",
-		border = "rounded",
-	})
-end
-
-local function open_keys()
-	state.keys_buf = vim.api.nvim_create_buf(false, true)
-
-	state.keys_win = vim.api.nvim_open_win(state.keys_buf, false, {
-		relative = "editor",
-		anchor = "NE",
-		row = 5,
-		col = vim.o.columns - 2,
-		width = 30,
+		width = 20,
 		height = 4,
 		style = "minimal",
 		border = "rounded",
 	})
+
+	-- Enhanced HUD styling
+	vim.api.nvim_set_hl(0, "RecHudTitle", {
+		fg = "#ef4444", -- Red
+		bg = "#0f172a",
+		bold = true,
+	})
+
+	vim.api.nvim_set_hl(0, "RecHudTime", {
+		fg = "#10b981", -- Green
+		bg = "#0f172a",
+		bold = true,
+	})
+
+	vim.api.nvim_set_hl(0, "RecHudBorder", {
+		fg = "#ef4444", -- Red border to match
+	})
+
+	vim.api.nvim_set_option_value("winhl", "Normal:RecHudTitle,FloatBorder:RecHudBorder", { win = state.hud_win })
+	vim.api.nvim_set_option_value("winblend", 5, { win = state.hud_win })
+end
+
+local function open_keys()
+	-- Only show overlay if configured
+	if not config.options.keys.show_overlay then
+		return
+	end
+
+	-- ALWAYS recreate
+	if state.keys_win and vim.api.nvim_win_is_valid(state.keys_win) then
+		vim.api.nvim_win_close(state.keys_win, true)
+	end
+
+	state.keys_buf = vim.api.nvim_create_buf(false, true)
+
+	vim.api.nvim_buf_set_lines(state.keys_buf, 0, -1, false, {
+		"",
+		"  ⌨  KEYSTROKES  ",
+		"",
+		"",
+		"",
+	})
+
+	-- Get position from config
+	local pos = config.get_overlay_position()
+	local opts = config.options.overlay
+
+	state.keys_win = vim.api.nvim_open_win(state.keys_buf, false, {
+		relative = "editor",
+		anchor = pos.anchor,
+		row = pos.row,
+		col = pos.col,
+		width = opts.width,
+		height = opts.height,
+		style = "minimal",
+		border = "rounded",
+	})
+
+	-- Enhanced styling with better colors and bigger text effect
+	vim.api.nvim_set_hl(0, "RecKeysTitle", {
+		fg = "#60a5fa", -- Bright blue
+		bg = "#0f172a", -- Dark blue-black
+		bold = true,
+	})
+
+	vim.api.nvim_set_hl(0, "RecKeysBig", {
+		fg = "#fbbf24", -- Amber/yellow for keypresses
+		bg = "#0f172a",
+		bold = true,
+	})
+
+	vim.api.nvim_set_hl(0, "RecKeysBorder", {
+		fg = "#3b82f6", -- Blue border
+	})
+
+	vim.api.nvim_set_option_value("winhl", "Normal:RecKeysBig,FloatBorder:RecKeysBorder", { win = state.keys_win })
+	vim.api.nvim_set_option_value("winblend", config.get_window_blend(), { win = state.keys_win })
 end
 
 local function close_windows()
@@ -93,22 +165,37 @@ local function update_hud()
 	local elapsed = os.time() - state.start_time
 
 	vim.api.nvim_buf_set_lines(state.hud_buf, 0, -1, false, {
-		"🔴 REC",
-		format_time(elapsed),
+		"",
+		"  ● REC",
+		"  " .. format_time(elapsed),
+		"",
 	})
+
+	-- Apply specific highlights
+	vim.api.nvim_buf_add_highlight(state.hud_buf, -1, "RecHudTitle", 1, 0, -1)
+	vim.api.nvim_buf_add_highlight(state.hud_buf, -1, "RecHudTime", 2, 0, -1)
 end
 
 -- ---------- keystroke capture ----------
-
 local function redraw_keys()
 	if not (state.keys_buf and vim.api.nvim_buf_is_valid(state.keys_buf)) then
 		return
 	end
 
+	-- Format keystrokes with configured separator
+	local separator = config.options.keys.separator
+	local keys_display = table.concat(state.keys, separator)
+
 	vim.api.nvim_buf_set_lines(state.keys_buf, 0, -1, false, {
-		"⌨ Keystrokes",
-		table.concat(state.keys, " "),
+		"",
+		"  ⌨  KEYSTROKES  ",
+		"",
+		"  " .. keys_display,
+		"",
 	})
+
+	-- Apply title highlight to the header line
+	vim.api.nvim_buf_add_highlight(state.keys_buf, -1, "RecKeysTitle", 1, 0, -1)
 end
 
 local function on_key(key)
@@ -116,17 +203,17 @@ local function on_key(key)
 		return
 	end
 
-	local k = vim.fn.keytrans(key)
+	local normalized = keys.process(key)
 
-	-- filter junk
-	if k == "<Ignore>" or k == "" then
+	if not normalized then
 		return
 	end
 
-	table.insert(state.keys, k)
+	table.insert(state.keys, normalized)
 
-	-- keep last ~20 keys
-	if #state.keys > 20 then
+	-- Use configured max_keys
+	local max_keys = config.options.overlay.max_keys
+	if #state.keys > max_keys then
 		table.remove(state.keys, 1)
 	end
 
@@ -140,7 +227,14 @@ local function run(args)
 		return
 	end
 
-	vim.fn.jobstart(vim.list_extend({ REC_CLI }, args), {
+	-- Add output directory to args if specified
+	local cli_args = vim.list_extend({ REC_CLI }, args)
+	if config.options.recording.output_dir then
+		table.insert(cli_args, "--output-dir")
+		table.insert(cli_args, config.get_output_dir())
+	end
+
+	vim.fn.jobstart(cli_args, {
 		stdout_buffered = true,
 		stderr_buffered = true,
 
@@ -180,6 +274,8 @@ function M.start()
 	state.start_time = os.time()
 	state.keys = {}
 
+	keys.reset() -- Reset keys processor state
+
 	open_hud()
 	open_keys()
 
@@ -212,7 +308,16 @@ function M.stop()
 	state.start_time = nil
 	state.keys = {}
 
+	keys.reset() -- Clean up keys state
+
 	notify("REC_STOP_OK")
+
+	-- Auto-open video if configured
+	if config.options.recording.auto_open then
+		vim.defer_fn(function()
+			M.open_latest()
+		end, 500) -- Small delay to ensure file is written
+	end
 end
 
 -- ---------- statusline ----------
@@ -221,9 +326,55 @@ function M.status()
 	return state.running and "🔴 REC" or ""
 end
 
-function M.setup()
+-- ---------- video opener ----------
+
+function M.open_latest()
+	local output_dir = config.get_output_dir()
+
+	-- Find latest video file
+	local handle = io.popen(string.format('ls -t "%s"/*.mp4 2>/dev/null | head -1', output_dir))
+
+	if not handle then
+		notify("Could not find recordings", vim.log.levels.WARN)
+		return
+	end
+
+	local latest = handle:read("*l")
+	handle:close()
+
+	if not latest or latest == "" then
+		notify("No recordings found in " .. output_dir, vim.log.levels.WARN)
+		return
+	end
+
+	-- Determine open command
+	local open_cmd = config.options.recording.open_command
+
+	if not open_cmd then
+		-- Auto-detect based on OS
+		if vim.fn.has("mac") == 1 then
+			open_cmd = "open"
+		elseif vim.fn.has("unix") == 1 then
+			open_cmd = "xdg-open"
+		elseif vim.fn.has("win32") == 1 then
+			open_cmd = "start"
+		else
+			notify("Could not determine video player command", vim.log.levels.ERROR)
+			return
+		end
+	end
+
+	-- Open video
+	vim.fn.jobstart({ open_cmd, latest }, { detach = true })
+	notify("Opening: " .. vim.fn.fnamemodify(latest, ":t"))
+end
+
+function M.setup(opts)
+	config.setup(opts)
+
 	vim.api.nvim_create_user_command("RecStart", M.start, {})
 	vim.api.nvim_create_user_command("RecStop", M.stop, {})
+	vim.api.nvim_create_user_command("RecOpen", M.open_latest, { desc = "Open latest recording" })
 end
 
 return M
