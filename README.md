@@ -1,55 +1,75 @@
-🎥 rec.nvim
+# 🎥 rec.nvim
 
-A minimal, native Neovim screen recording plugin — built for developers.
+> Native Neovim screen recording — fast, minimal, and built for developers.
 
-rec.nvim lets you record your Neovim sessions directly from the editor using a fast Rust backend (rec-cli).
-It focuses on clarity, reliability, and developer UX, not bloated overlays or external GUIs.
+`rec.nvim` is a **Neovim-first screen recording plugin** powered by a Rust backend.  
+It lets you record editor sessions directly from Neovim with a clean HUD, keystroke overlay, and zero external UI clutter.
 
-✨ Features
+---
 
-🔴 One-command recording
+## 📸 Preview
 
-⏱ Live recording timer
+<!-- Add screenshots or GIFs here -->
 
-⌨️ Keystroke overlay (for tutorials & demos)
+<p align="center">
+  <img src="assets/rec-hud.png" alt="Recording HUD" width="700"/>
+</p>
 
-🪟 Floating HUD (non-intrusive)
+<p align="center">
+  <img src="assets/rec-keystrokes.png" alt="Keystroke overlay" width="700"/>
+</p>
 
-📁 Automatic file saving
+<p align="center">
+  <img src="assets/rec-dashboard.png" alt="Dashboard" width="700"/>
+</p>
 
-🧠 Native Neovim Lua (no external UI plugins required)
+---
 
-⚡ Rust-powered backend for performance & stability
+## ✨ Features
 
-🧩 Architecture
+- 🔴 One-command recording
+- ⏱ Live recording timer (HUD)
+- ⌨️ Keystroke overlay (tutorial-friendly)
+- 🪟 Floating, non-intrusive UI
+- 📁 Automatic video saving
+- ⚡ Rust-powered recorder backend
+- 🧠 Native Lua integration (no UI plugins required)
+
+---
+
+## 🧩 Architecture
+
 rec.nvim/
 ├── lua/rec/
-│   ├── init.lua        -- Core plugin logic
-│   ├── dashboard.lua  -- Recording dashboard (read-only)
-│   ├── keys.lua       -- Keystroke capture & rendering
-│   ├── geometry.lua  -- Floating window placement helpers
-│   └── config.lua    -- User configuration
+│ ├── init.lua -- Core plugin logic
+│ ├── dashboard.lua -- Recording dashboard
+│ ├── keys.lua -- Keystroke capture & rendering
+│ ├── geometry.lua -- Floating window placement helpers
+│ └── config.lua -- User configuration
 ├── crates/
-│   └── rec-cli/       -- Rust recording backend (ffmpeg-based)
+│ └── rec-cli/ -- Rust recording backend (ffmpeg-based)
 └── README.md
 
 
-Lua handles UX, state, and editor integration
+- **Lua** → UX, state, Neovim integration  
+- **Rust (rec-cli)** → screen/window capture & encoding  
+- Communication via non-blocking `jobstart`
 
-Rust (rec-cli) handles screen/window capture and encoding
+---
 
-Communication happens via jobstart (no blocking)
+## 🚀 Installation
 
-🚀 Installation
-Requirements
+### Requirements
 
-Neovim 0.9+
+- Neovim **0.9+**
+- `ffmpeg`
+- macOS (Linux support planned)
 
-ffmpeg installed and available
+---
 
-macOS (Linux support planned)
+### Using `lazy.nvim`
 
-Using lazy.nvim
+```lua
 {
   "willsantiagomedina/rec.nvim",
   config = function()
@@ -57,53 +77,51 @@ Using lazy.nvim
   end,
 }
 
-
-⚠️ Make sure rec-cli is built (see below).
+    ⚠️ rec-cli must be built manually (see below)
 
 🛠 Building the Recorder (rec-cli)
+
 cd ~/dev/rec.nvim/crates/rec-cli
 cargo build
 
-
-Ensure the binary exists at:
+Binary location used by the plugin:
 
 ~/dev/rec.nvim/crates/rec-cli/target/debug/rec-cli
 
-
-rec.nvim does not rely on $PATH — the absolute path is used for safety.
+    rec.nvim uses an absolute path by design (no $PATH reliance).
 
 🎬 Usage
 Start Recording
+
 :RecStart
 
+    Opens recording HUD
 
-Shows a floating HUD
+    Starts timer
 
-Starts timer
-
-Enables keystroke overlay
+    Enables keystroke capture
 
 Stop Recording
+
 :RecStop
 
+    Stops recording
 
-Stops recording
+    Saves video to disk
 
-Saves video to disk
-
-Cleans up overlays
+    Cleans up overlays
 
 Open Dashboard
+
 :RecDashboard
 
+    Lists saved recordings
 
-Lists saved recordings
+    Navigate with j / k
 
-Navigate with j / k
+    <Enter> to open
 
-Press <Enter> to open
-
-q or <Esc> to close
+    q / <Esc> to close
 
 📂 Output Location
 
@@ -111,10 +129,9 @@ By default, recordings are saved to:
 
 ~/Videos/nvim-recordings/
 
-
-Filenames include timestamps for easy sorting.
-
+Files are timestamped for easy sorting.
 ⚙️ Configuration
+
 require("rec").setup({
   output_dir = "~/Videos/nvim-recordings",
   show_keystrokes = true,
@@ -123,46 +140,243 @@ require("rec").setup({
   },
 })
 
-
-More options coming as the plugin stabilizes.
-
 🧠 Design Philosophy
 
-Stability first
+    Stability over cleverness
 
-No autocommand spam
+    No CursorMoved hooks
 
-No CursorMoved hooks
+    No UI plugin dependency
 
-No hard dependency on UI plugins
+    Predictable state management
 
-Readable Lua > clever hacks
+    Hackable, readable Lua
 
-This plugin is built to be hackable, debuggable, and trustworthy.
-
+This plugin is meant to be debuggable, extensible, and trustworthy.
 🛣 Roadmap
 
-⏸ Pause / Resume recording
+    ⏸ Pause / Resume recording
 
-🪟 Record current window only
+    🪟 Record current window only
 
-🧭 Timeline markers
+    🧭 Timeline markers
 
-🖼 Thumbnails in dashboard
+    🖼 Dashboard thumbnails
 
-📤 Export / upload helpers
+    📤 Export / upload helpers
 
 🤝 Contributing
 
 PRs and ideas welcome — especially around:
 
-Linux support
+    Linux support
 
-FFmpeg capture strategies
+    FFmpeg capture strategies
 
-UI ergonomics
+    UI ergonomics
 
-Performance tuning
+    Performance tuning
+
+📜 License
+
+MIT
+
+
+---
+
+If you want next, I can:
+- Design **clean example screenshots** to match the README
+- Add **badges** (Neovim, Rust, ffmpeg)
+- Write a **CONTRIBUTING.md**
+- Help you polish this for **GitHub stars & discoverability**
+
+You’re building something genuinely solid here — this already reads like a real tool, not a side project 💪
+
+You said:
+it should all be in one copy paste readme format
+ChatGPT said:
+
+Got it 👍 — here is ONE single, clean, copy-pasteable README.md, nothing extra before or after.
+You can paste this directly into README.md and commit.
+
+# 🎥 rec.nvim
+
+> Native Neovim screen recording — fast, minimal, and built for developers.
+
+`rec.nvim` is a **Neovim-first screen recording plugin** powered by a Rust backend.  
+It lets you record editor sessions directly from Neovim with a clean HUD, keystroke overlay, and zero external UI clutter.
+
+---
+
+## 📸 Preview
+
+<!-- Add screenshots or GIFs here -->
+
+<p align="center">
+  <img src="assets/rec-hud.png" alt="Recording HUD" width="700"/>
+</p>
+
+<p align="center">
+  <img src="assets/rec-keystrokes.png" alt="Keystroke overlay" width="700"/>
+</p>
+
+<p align="center">
+  <img src="assets/rec-dashboard.png" alt="Dashboard" width="700"/>
+</p>
+
+---
+
+## ✨ Features
+
+- 🔴 One-command recording
+- ⏱ Live recording timer (HUD)
+- ⌨️ Keystroke overlay (tutorial-friendly)
+- 🪟 Floating, non-intrusive UI
+- 📁 Automatic video saving
+- ⚡ Rust-powered recorder backend
+- 🧠 Native Lua integration (no UI plugins required)
+
+---
+
+## 🧩 Architecture
+
+rec.nvim/
+├── lua/rec/
+│ ├── init.lua -- Core plugin logic
+│ ├── dashboard.lua -- Recording dashboard
+│ ├── keys.lua -- Keystroke capture & rendering
+│ ├── geometry.lua -- Floating window placement helpers
+│ └── config.lua -- User configuration
+├── crates/
+│ └── rec-cli/ -- Rust recording backend (ffmpeg-based)
+└── README.md
+
+
+- **Lua** → UX, state, Neovim integration  
+- **Rust (rec-cli)** → screen/window capture & encoding  
+- Communication via non-blocking `jobstart`
+
+---
+
+## 🚀 Installation
+
+### Requirements
+
+- Neovim **0.9+**
+- `ffmpeg`
+- macOS (Linux support planned)
+
+---
+
+### Using `lazy.nvim`
+
+```lua
+{
+  "willsantiagomedina/rec.nvim",
+  config = function()
+    require("rec").setup()
+  end,
+}
+
+    ⚠️ rec-cli must be built manually (see below)
+
+🛠 Building the Recorder (rec-cli)
+
+cd ~/dev/rec.nvim/crates/rec-cli
+cargo build
+
+Binary location used by the plugin:
+
+~/dev/rec.nvim/crates/rec-cli/target/debug/rec-cli
+
+    rec.nvim uses an absolute path by design (no $PATH reliance).
+
+🎬 Usage
+Start Recording
+
+:RecStart
+
+    Opens recording HUD
+
+    Starts timer
+
+    Enables keystroke capture
+
+Stop Recording
+
+:RecStop
+
+    Stops recording
+
+    Saves video to disk
+
+    Cleans up overlays
+
+Open Dashboard
+
+:RecDashboard
+
+    Lists saved recordings
+
+    Navigate with j / k
+
+    <Enter> to open
+
+    q / <Esc> to close
+
+📂 Output Location
+
+By default, recordings are saved to:
+
+~/Videos/nvim-recordings/
+
+Files are timestamped for easy sorting.
+⚙️ Configuration
+
+require("rec").setup({
+  output_dir = "~/Videos/nvim-recordings",
+  show_keystrokes = true,
+  hud = {
+    position = "top-right",
+  },
+})
+
+🧠 Design Philosophy
+
+    Stability over cleverness
+
+    No CursorMoved hooks
+
+    No UI plugin dependency
+
+    Predictable state management
+
+    Hackable, readable Lua
+
+This plugin is meant to be debuggable, extensible, and trustworthy.
+🛣 Roadmap
+
+    ⏸ Pause / Resume recording
+
+    🪟 Record current window only
+
+    🧭 Timeline markers
+
+    🖼 Dashboard thumbnails
+
+    📤 Export / upload helpers
+
+🤝 Contributing
+
+PRs and ideas welcome — especially around:
+
+    Linux support
+
+    FFmpeg capture strategies
+
+    UI ergonomics
+
+    Performance tuning
 
 📜 License
 
