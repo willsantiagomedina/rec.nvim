@@ -108,10 +108,21 @@ cargo build --release
 
 The built binary will be at `target/release/rec-cli` (or `target/debug/rec-cli` for development builds).
 
-> **Note**: You'll need to update the `BIN` path in `lua/rec/cli.lua` to point to your compiled binary. For example:
+> **Note**: You'll need to update the `BIN` path in `lua/rec/cli.lua` to point to your compiled binary. Choose the path that matches your plugin manager:
 > ```lua
-> -- In lua/rec/cli.lua
+> -- In lua/rec/cli.lua, update the BIN variable:
+> 
+> -- For lazy.nvim:
 > local BIN = vim.fn.expand("~/.local/share/nvim/lazy/rec.nvim/crates/rec-cli/target/release/rec-cli")
+> 
+> -- For packer.nvim:
+> local BIN = vim.fn.expand("~/.local/share/nvim/site/pack/packer/start/rec.nvim/crates/rec-cli/target/release/rec-cli")
+> 
+> -- For vim-plug (Neovim):
+> local BIN = vim.fn.expand("~/.local/share/nvim/plugged/rec.nvim/crates/rec-cli/target/release/rec-cli")
+> 
+> -- For vim-plug (Vim):
+> local BIN = vim.fn.expand("~/.vim/plugged/rec.nvim/crates/rec-cli/target/release/rec-cli")
 > ```
 
 ## Configuration
