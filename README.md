@@ -121,9 +121,9 @@ require('lualine').setup {
   sections = {
     lualine_x = { 
       function() 
-        local cli = require('rec.cli')
-        -- This will show "🔴 REC" when recording
-        return cli.status and cli.status() or ""
+        local rec = require('rec.init')
+        -- Returns "🔴 REC" when recording, empty string otherwise
+        return rec.status()
       end 
     }
   }
@@ -316,7 +316,7 @@ rec.nvim/
 1. **Neovim Layer** (`lua/rec/`): Manages UI, state, and user commands
 2. **CLI Backend** (`crates/rec-cli/`): Handles FFmpeg process management
 3. **Communication**: The Lua layer calls the Rust CLI which manages FFmpeg
-4. **Output**: Videos are encoded using FFmpeg's avfoundation input and saved as MP4
+4. **Output**: Videos are encoded using FFmpeg's AVFoundation input and saved as MP4
 
 ---
 
