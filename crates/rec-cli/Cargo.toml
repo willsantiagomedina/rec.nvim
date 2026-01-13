@@ -1,0 +1,26 @@
+[package]
+name = "rec-cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["Will Santiago <santiagowill054@gmail.com>"]
+description = "CLI backend for rec.nvim (ffmpeg-based screen recorder)"
+license = "MIT"
+repository = "https://github.com/willsantiagomedina/rec.nvim"
+readme = "../../README.md"
+
+[dependencies]
+# Global singleton for managing the ffmpeg child process
+once_cell = "1.19"
+
+# Cross-platform home directory resolution
+dirs = "5.0"
+
+# Unix signals (SIGINT) — required for macOS/Linux so ffmpeg flushes MP4
+nix = { version = "0.27", features = ["signal"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
