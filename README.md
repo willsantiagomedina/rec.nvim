@@ -112,8 +112,8 @@ require("rec").setup({
 
 Drop screenshots and gifs into `docs/images/` and update the links below.
 
-![Dashboard](docs/images/Screenshot 2026-01-13 at 8.12.24 PM.png)
-![Window Selection](docs/images/Screenshot 2026-01-13 at 8.13.17 PM.png)
+![Dashboard](docs/images/dashboard.png)
+![Window Selection](docs/images/window-selection.png)
 
 ## Notes
 
