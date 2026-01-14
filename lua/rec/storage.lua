@@ -7,6 +7,7 @@ local config = require("rec.config")
 ---@field timestamp number Unix timestamp when recording was created
 ---@field mode string "fullscreen" or "window"
 ---@field duration number|nil Recording duration in seconds (if available)
+---@field title string|nil Auto-generated title
 
 ---Get the path to the metadata file
 ---@return string
@@ -129,8 +130,9 @@ end
 ---@param filepath string Full path to the video file
 ---@param mode string Recording mode ("fullscreen" or "window")
 ---@param duration number|nil Recording duration in seconds
+---@param title string|nil Recording title
 ---@return boolean success
-function M.add_recording(filepath, mode, duration)
+function M.add_recording(filepath, mode, duration, title)
 	-- Debug: Log what we're trying to add
 	vim.notify(
 		string.format(
@@ -177,6 +179,7 @@ function M.add_recording(filepath, mode, duration)
 		timestamp = os.time(),
 		mode = mode or "fullscreen",
 		duration = duration,
+		title = title,
 	})
 
 	vim.notify(
@@ -243,6 +246,35 @@ function M.delete_recording(filepath)
 	end
 
 	return save_recordings(filtered)
+end
+
+---Update a recording's metadata fields
+---@param filepath string Full path to the video file
+---@param updates table Fields to update
+---@return boolean success
+function M.update_recording(filepath, updates)
+	if not filepath or filepath == "" then
+		return false
+	end
+
+	local recordings = M.load_recordings()
+	local updated = false
+
+	for _, rec in ipairs(recordings) do
+		if rec.path == filepath then
+			for key, value in pairs(updates or {}) do
+				rec[key] = value
+			end
+			updated = true
+			break
+		end
+	end
+
+	if not updated then
+		return false
+	end
+
+	return save_recordings(recordings)
 end
 
 ---Get all recordings sorted by timestamp (newest first)

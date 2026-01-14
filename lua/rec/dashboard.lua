@@ -113,7 +113,12 @@ local function filter_recordings()
 		local filename = vim.fn.fnamemodify(rec.path or "", ":t"):lower()
 		local path = (rec.path or ""):lower()
 		local mode = (rec.mode or ""):lower()
-		if filename:find(query, 1, true) or path:find(query, 1, true) or mode:find(query, 1, true) then
+		local title = (rec.title or ""):lower()
+		if filename:find(query, 1, true)
+			or path:find(query, 1, true)
+			or mode:find(query, 1, true)
+			or title:find(query, 1, true)
+		then
 			table.insert(filtered, rec)
 		end
 	end
@@ -174,8 +179,10 @@ local function build_content()
 			local filename = vim.fn.fnamemodify(rec.path, ":t")
 			local date = format_date(rec.timestamp or os.time())
 			local mode_str = (rec.mode == "window") and "[WIN]" or "[FULL]"
+			local title = rec.title or filename
 
-			table.insert(lines, string.format("%s%s %s", prefix, mode_str, filename))
+			table.insert(lines, string.format("%s%s %s", prefix, mode_str, title))
+			table.insert(lines, string.format("     %s", filename))
 			table.insert(lines, string.format("     %s", date))
 			table.insert(lines, string.format("     %s", rec.path))
 
@@ -189,7 +196,7 @@ local function build_content()
 	table.insert(lines, "")
 	table.insert(lines, "  " .. string.rep("─", width - 2))
 	table.insert(lines, "")
-	table.insert(lines, "  Controls: <Enter> Open  •  d Delete  •  / Search  •  q Quit")
+	table.insert(lines, "  Controls: <Enter> Open  •  r Rename  •  y Copy  •  o Reveal  •  d Delete  •  / Search  •  q Quit")
 	table.insert(lines, "")
 
 	return lines
@@ -238,6 +245,10 @@ local function refresh()
 
 		if line:match("^     %d%d%d%d%-%d%d%-%d%d") then
 			vim.api.nvim_buf_add_highlight(state.buf, -1, "RecDashboardDate", lnum, 0, -1)
+		end
+
+		if line:match("^     rec_") then
+			vim.api.nvim_buf_add_highlight(state.buf, -1, "RecDashboardFilename", lnum, 0, -1)
 		end
 
 		if line:match("^     /") or line:match("^     ~") then
@@ -301,6 +312,85 @@ local function open_recording()
 	vim.notify("Opening: " .. vim.fn.fnamemodify(rec.path, ":t"), vim.log.levels.INFO, { title = "rec.nvim" })
 end
 
+local function reveal_recording()
+	local rec = get_selected()
+	if not rec then
+		return
+	end
+
+	rec.path = normalize_path(rec.path)
+	local stat = vim.loop.fs_stat(rec.path)
+	if not stat then
+		vim.notify("File not found: " .. rec.path, vim.log.levels.ERROR, { title = "rec.nvim" })
+		refresh()
+		return
+	end
+
+	local open_cmd = nil
+	local args = nil
+
+	if vim.fn.has("mac") == 1 then
+		open_cmd = "open"
+		args = { "-R", rec.path }
+	elseif vim.fn.has("unix") == 1 then
+		open_cmd = "xdg-open"
+		args = { vim.fn.fnamemodify(rec.path, ":h") }
+	elseif vim.fn.has("win32") == 1 then
+		open_cmd = "explorer"
+		args = { "/select,", rec.path }
+	else
+		vim.notify("No file manager configured", vim.log.levels.ERROR, { title = "rec.nvim" })
+		return
+	end
+
+	local cmd = { open_cmd }
+	vim.list_extend(cmd, args)
+	vim.fn.jobstart(cmd, { detach = true })
+	vim.notify("Revealed: " .. vim.fn.fnamemodify(rec.path, ":t"), vim.log.levels.INFO, { title = "rec.nvim" })
+end
+
+local function copy_recording_path()
+	local rec = get_selected()
+	if not rec then
+		return
+	end
+
+	rec.path = normalize_path(rec.path)
+	vim.fn.setreg("+", rec.path)
+	vim.fn.setreg('"', rec.path)
+	vim.notify("Copied path to clipboard", vim.log.levels.INFO, { title = "rec.nvim" })
+end
+
+local function rename_title()
+	local rec = get_selected()
+	if not rec then
+		return
+	end
+
+	rec.path = normalize_path(rec.path)
+	local current = rec.title or vim.fn.fnamemodify(rec.path, ":t")
+	local input = vim.fn.input("Title: ", current)
+	if input == nil then
+		return
+	end
+	local title = input:gsub("[%c]", " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+	if title == "" then
+		vim.notify("Title cannot be empty", vim.log.levels.WARN, { title = "rec.nvim" })
+		return
+	end
+	if #title > 60 then
+		title = title:sub(1, 60):gsub("%s+$", "")
+	end
+
+	local ok = storage.update_recording(rec.path, { title = title })
+	if ok then
+		vim.notify("Title updated", vim.log.levels.INFO, { title = "rec.nvim" })
+		refresh()
+	else
+		vim.notify("Failed to update title", vim.log.levels.ERROR, { title = "rec.nvim" })
+	end
+end
+
 local function delete_recording()
 	local rec = get_selected()
 	if not rec then
@@ -361,6 +451,9 @@ local function setup_keymaps()
 
 	vim.keymap.set("n", "<CR>", open_recording, opts)
 	vim.keymap.set("n", "d", delete_recording, opts)
+	vim.keymap.set("n", "r", rename_title, opts)
+	vim.keymap.set("n", "y", copy_recording_path, opts)
+	vim.keymap.set("n", "o", reveal_recording, opts)
 	vim.keymap.set("n", "/", function()
 		local input = vim.fn.input("Search recordings: ", state.search_query or "")
 		state.search_query = input or ""
@@ -385,6 +478,7 @@ local function setup_highlights()
 	vim.api.nvim_set_hl(0, "RecDashboardBadgeWin", { fg = "#22d3ee", bold = true })
 	vim.api.nvim_set_hl(0, "RecDashboardBadgeFull", { fg = "#f59e0b", bold = true })
 	vim.api.nvim_set_hl(0, "RecDashboardDate", { fg = "#94a3b8" })
+	vim.api.nvim_set_hl(0, "RecDashboardFilename", { fg = "#cbd5f5" })
 	vim.api.nvim_set_hl(0, "RecDashboardPath", { fg = "#64748b" })
 end
 

@@ -7,6 +7,8 @@ local dashboard = require("rec.dashboard")
 
 -- 🔧 absolute path (DO NOT RELY ON $PATH)
 local REC_CLI = vim.fn.expand("~/dev/rec.nvim/crates/rec-cli/target/debug/rec-cli")
+local PID_FILE = "/tmp/rec.nvim.pid"
+local OUT_FILE = "/tmp/rec.nvim.outpath"
 
 local state = {
 	running = false,
@@ -56,6 +58,143 @@ local function format_time(sec)
 	local m = math.floor(sec / 60)
 	local s = sec % 60
 	return string.format("%02d:%02d", m, s)
+end
+
+local function read_pid()
+	local ok, lines = pcall(vim.fn.readfile, PID_FILE)
+	if not ok or not lines or not lines[1] then
+		return nil
+	end
+	local pid = tonumber(lines[1])
+	return pid
+end
+
+local function read_outpath()
+	local ok, lines = pcall(vim.fn.readfile, OUT_FILE)
+	if not ok or not lines or not lines[1] then
+		return nil
+	end
+	local path = lines[1]
+	if path == "" then
+		return nil
+	end
+	return path
+end
+
+local function send_signal(sig)
+	local pid = read_pid()
+	if not pid then
+		return false, "PID not found"
+	end
+	vim.fn.system({ "kill", "-" .. sig, tostring(pid) })
+	if vim.v.shell_error ~= 0 then
+		return false, "kill failed"
+	end
+	return true
+end
+
+local function sanitize_title(text)
+	if not text or text == "" then
+		return ""
+	end
+	local clean = text:gsub("[%c]", " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+	if #clean > 60 then
+		clean = clean:sub(1, 60):gsub("%s+$", "")
+	end
+	return clean
+end
+
+local function base_dir_from_buffer()
+	local buf = vim.api.nvim_get_current_buf()
+	local name = vim.api.nvim_buf_get_name(buf)
+	if name ~= "" then
+		local dir = vim.fn.fnamemodify(name, ":p:h")
+		if dir and dir ~= "" then
+			return dir
+		end
+	end
+	return vim.fn.getcwd()
+end
+
+local function git_cmd(args)
+	local base = base_dir_from_buffer()
+	local cmd = { "git", "-C", base }
+	vim.list_extend(cmd, args)
+	local out = vim.fn.systemlist(cmd)
+	if vim.v.shell_error ~= 0 then
+		return nil
+	end
+	return out
+end
+
+local function title_from_branch()
+	local out = git_cmd({ "rev-parse", "--abbrev-ref", "HEAD" })
+	if not out or not out[1] then
+		return nil
+	end
+	local branch = out[1]
+	if branch == "main" or branch == "master" or branch == "dev" then
+		return nil
+	end
+	branch = branch:gsub("^origin/", "")
+	local kind, rest = branch:match("^([%w%-_]+)%/(.+)$")
+	if kind and rest then
+		rest = rest:gsub("[-_]+", " ")
+		return sanitize_title(string.format("%s: %s", kind, rest))
+	end
+	return sanitize_title(branch:gsub("[-_]+", " "))
+end
+
+local function title_from_git_diff()
+	local out = git_cmd({ "diff", "--stat" })
+	if not out then
+		return nil
+	end
+	for _, line in ipairs(out) do
+		local path = line:match("^%s*([^|]+)%s+|")
+		if path then
+			local filename = vim.fn.fnamemodify(path, ":t")
+			local base = filename:gsub("%.%w+$", ""):gsub("[-_]+", " ")
+			if base ~= "" then
+				return sanitize_title("update: " .. base)
+			end
+			break
+		end
+	end
+	return nil
+end
+
+local function title_from_buffer()
+	local buf = vim.api.nvim_get_current_buf()
+	local name = vim.api.nvim_buf_get_name(buf)
+	if name == "" then
+		return nil
+	end
+	local filename = vim.fn.fnamemodify(name, ":t")
+	local base = filename:gsub("%.%w+$", ""):gsub("[-_]+", " ")
+	if base == "" then
+		return nil
+	end
+	return sanitize_title(base)
+end
+
+local function generate_title()
+	local title = title_from_branch()
+	if title and title ~= "" then
+		return title
+	end
+
+	title = title_from_git_diff()
+	if title and title ~= "" then
+		return title
+	end
+
+	title = title_from_buffer()
+	if title and title ~= "" then
+		return title
+	end
+
+	return sanitize_title("Recording " .. os.date("%Y-%m-%d %H:%M"))
 end
 
 -- ---------- floating windows ----------
@@ -475,19 +614,10 @@ function M.pause()
 		return
 	end
 
-	-- Send pause command to rec-cli
-	if state.job_id then
-		-- Send the pause command via job stdin or separate command
-		-- Option 1: Use a control socket/pipe (requires rec-cli support)
-		-- Option 2: Send to stdin if rec-cli listens for commands
-		-- Option 3: Call rec-cli pause subcommand
-
-		-- Using approach 3: call rec-cli with pause subcommand
-		local result = vim.fn.system({ REC_CLI, "pause" })
-		if vim.v.shell_error ~= 0 then
-			notify("Failed to pause recording: " .. result, vim.log.levels.ERROR)
-			return
-		end
+	local ok, err = send_signal("STOP")
+	if not ok then
+		notify("Failed to pause recording: " .. (err or "unknown"), vim.log.levels.ERROR)
+		return
 	end
 
 	state.paused = true
@@ -510,13 +640,10 @@ function M.resume()
 		return
 	end
 
-	-- Send resume command to rec-cli
-	if state.job_id then
-		local result = vim.fn.system({ REC_CLI, "resume" })
-		if vim.v.shell_error ~= 0 then
-			notify("Failed to resume recording: " .. result, vim.log.levels.ERROR)
-			return
-		end
+	local ok, err = send_signal("CONT")
+	if not ok then
+		notify("Failed to resume recording: " .. (err or "unknown"), vim.log.levels.ERROR)
+		return
 	end
 
 	-- Calculate how long we were paused and add to total
@@ -535,6 +662,10 @@ function M.stop()
 	if not state.running then
 		notify("REC_NOT_RUNNING", vim.log.levels.WARN)
 		return
+	end
+
+	if state.paused then
+		send_signal("CONT")
 	end
 
 	run({ "stop" })
@@ -597,8 +728,9 @@ function M.stop()
 			end
 		end
 
-		if output_file then
-			local success = storage.add_recording(output_file, mode, duration)
+	if output_file then
+			local title = generate_title()
+			local success = storage.add_recording(output_file, mode, duration, title)
 			if success then
 				vim.notify("Recording saved to dashboard", vim.log.levels.INFO, { title = "rec.nvim" })
 			else
@@ -620,6 +752,60 @@ function M.stop()
 			vim.notify("Warning: Could not locate recording file", vim.log.levels.WARN, { title = "rec.nvim" })
 		end
 	end, 1000) -- Increased delay to ensure file is written
+end
+
+function M.cancel()
+	if not state.running then
+		notify("REC_NOT_RUNNING", vim.log.levels.WARN)
+		return
+	end
+
+	local choice = vim.fn.confirm("Cancel recording and discard file?", "&Yes\n&No", 2)
+	if choice ~= 1 then
+		notify("Cancel aborted", vim.log.levels.INFO)
+		return
+	end
+
+	if state.paused then
+		send_signal("CONT")
+	end
+
+	run({ "stop" })
+
+	if state.timer then
+		state.timer:stop()
+		state.timer:close()
+		state.timer = nil
+	end
+
+	vim.on_key(nil, state.key_ns)
+	close_windows()
+
+	local output_file = state.output_file or read_outpath()
+
+	state.running = false
+	state.paused = false
+	state.recording_mode = nil
+	state.capture_geometry = nil
+	state.start_time = nil
+	state.pause_time = nil
+	state.total_paused_duration = 0
+	state.job_id = nil
+	state.output_file = nil
+	state.keys = {}
+
+	keys.reset()
+
+	notify("REC_CANCELED")
+
+	vim.defer_fn(function()
+		if output_file then
+			local ok = vim.loop.fs_unlink(output_file)
+			if ok then
+				notify("Canceled recording deleted: " .. vim.fn.fnamemodify(output_file, ":t"))
+			end
+		end
+	end, 700)
 end
 
 -- ---------- statusline ----------
@@ -682,6 +868,7 @@ function M.setup(opts)
 	vim.api.nvim_create_user_command("RecPause", M.pause, { desc = "Pause recording" })
 	vim.api.nvim_create_user_command("RecResume", M.resume, { desc = "Resume recording" })
 	vim.api.nvim_create_user_command("RecStop", M.stop, { desc = "Stop recording" })
+	vim.api.nvim_create_user_command("RecCancel", M.cancel, { desc = "Cancel recording and discard file" })
 	vim.api.nvim_create_user_command("RecOpen", M.open_latest, { desc = "Open latest recording" })
 	vim.api.nvim_create_user_command("RecDashboard", dashboard.toggle, { desc = "Toggle recordings dashboard" })
 	vim.api.nvim_create_user_command("RecDebug", function()
