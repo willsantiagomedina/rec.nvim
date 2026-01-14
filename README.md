@@ -110,7 +110,6 @@ require("rec").setup({
 
 ## Images
 
-Drop screenshots and gifs into `docs/images/` and update the links below.
 
 ![Dashboard](docs/images/dashboard.png)
 ![Window Selection](docs/images/window-selection.png)
