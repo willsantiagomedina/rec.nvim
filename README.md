@@ -27,10 +27,8 @@
   ```bash
   brew install ffmpeg
   ```
-- **Rust Toolchain** - For building the CLI backend
-  ```bash
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-  ```
+- **Rust Toolchain** - For building the CLI backend  
+  See [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install) for installation instructions
 - **Screen Recording Permissions** - Enable in System Settings → Privacy & Security → Screen Recording
 
 ## 📦 Installation
@@ -65,15 +63,18 @@ use {
 
 ### Manual Installation
 
-1. Clone the repository:
+1. Clone the repository to your Neovim plugin directory:
    ```bash
-   git clone https://github.com/willsantiagomedina/rec.nvim.git ~/.local/share/nvim/site/pack/plugins/start/rec.nvim
+   # Adjust the path based on your Neovim setup
+   # Common locations:
+   #   - ~/.local/share/nvim/site/pack/plugins/start/rec.nvim
+   #   - ~/.config/nvim/pack/plugins/start/rec.nvim
+   git clone https://github.com/willsantiagomedina/rec.nvim.git <plugin-path>/rec.nvim
    ```
 
 2. Build the CLI:
    ```bash
-   cd ~/.local/share/nvim/site/pack/plugins/start/rec.nvim
-   cd crates/rec-cli
+   cd <plugin-path>/rec.nvim/crates/rec-cli
    cargo build --release
    ```
 
@@ -400,7 +401,12 @@ chmod +x target/release/rec-cli
 ffmpeg -f avfoundation -list_devices true -i ""
 ```
 
-Update the `SCREEN_INDEX` constant in `crates/rec-cli/src/main.rs` to match your screen device index.
+Or use the built-in command:
+```vim
+:RecDevices
+```
+
+**Note**: If your screen device index differs from the default (index 4), you'll need to update the `SCREEN_INDEX` constant in `crates/rec-cli/src/main.rs`. Future versions may make this configurable through plugin settings.
 
 ### Recording File Not Found
 
