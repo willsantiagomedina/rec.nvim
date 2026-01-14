@@ -9,6 +9,8 @@ local state = {
 	win = nil,
 	recordings = {},
 	selected_idx = 1,
+	search_query = "",
+	filtered = {},
 }
 
 ---Format timestamp as human-readable date
@@ -99,45 +101,75 @@ local function load_recordings()
 	return scan_recordings_dir()
 end
 
+local function filter_recordings()
+	local query = (state.search_query or ""):lower()
+	if query == "" then
+		state.filtered = state.recordings
+		return
+	end
+
+	local filtered = {}
+	for _, rec in ipairs(state.recordings or {}) do
+		local filename = vim.fn.fnamemodify(rec.path or "", ":t"):lower()
+		local path = (rec.path or ""):lower()
+		local mode = (rec.mode or ""):lower()
+		if filename:find(query, 1, true) or path:find(query, 1, true) or mode:find(query, 1, true) then
+			table.insert(filtered, rec)
+		end
+	end
+
+	state.filtered = filtered
+end
+
 ---Build the dashboard content lines
 ---@return string[]
 local function build_content()
 	local lines = {}
+	local width = math.floor(vim.o.columns * 0.62)
+	width = math.max(64, math.min(width, 100))
+
+	local function pad_center(text, inner_width)
+		local pad = inner_width - #text
+		if pad <= 0 then
+			return text:sub(1, inner_width)
+		end
+		local left = math.floor(pad / 2)
+		local right = pad - left
+		return string.rep(" ", left) .. text .. string.rep(" ", right)
+	end
 
 	-- Header
 	table.insert(lines, "")
-	table.insert(
-		lines,
-		"  ╭────────────────────────────────────────────────────────────────╮"
-	)
-	table.insert(lines, "  │                 📹 REC.NVIM RECORDINGS                         │")
-	table.insert(
-		lines,
-		"  ╰────────────────────────────────────────────────────────────────╯"
-	)
+	table.insert(lines, "  ┌" .. string.rep("─", width - 4) .. "┐")
+	table.insert(lines, "  │" .. pad_center("REC.NVIM", width - 4) .. "│")
+	table.insert(lines, "  │" .. pad_center("Recordings Dashboard", width - 4) .. "│")
+	table.insert(lines, "  └" .. string.rep("─", width - 4) .. "┘")
 	table.insert(lines, "")
 
 	-- Stats
-	local count = #state.recordings
+	local count = #state.filtered
 	table.insert(lines, string.format("  Total recordings: %d", count))
+	if (state.search_query or "") ~= "" then
+		table.insert(lines, string.format("  Search: %s", state.search_query))
+	end
 	table.insert(lines, "")
-	table.insert(
-		lines,
-		"  ────────────────────────────────────────────────────────────────"
-	)
+	table.insert(lines, "  " .. string.rep("─", width - 2))
 	table.insert(lines, "")
 
 	-- Recordings list
 	if count == 0 then
+		table.insert(lines, "  " .. pad_center("No recordings found", width - 2))
 		table.insert(lines, "")
-		table.insert(lines, "                   No recordings found")
-		table.insert(lines, "")
-		table.insert(lines, "         Start recording with :RecStart or :RecWin")
+		if (state.search_query or "") ~= "" then
+			table.insert(lines, "  " .. pad_center("Clear search with / then empty", width - 2))
+		else
+			table.insert(lines, "  " .. pad_center("Start recording with :RecStart or :RecWin", width - 2))
+		end
 		table.insert(lines, "")
 	else
-		for i, rec in ipairs(state.recordings) do
+		for i, rec in ipairs(state.filtered) do
 			local is_selected = i == state.selected_idx
-			local prefix = is_selected and "  ▶ " or "    "
+			local prefix = is_selected and "  ❯ " or "    "
 
 			local filename = vim.fn.fnamemodify(rec.path, ":t")
 			local date = format_date(rec.timestamp or os.time())
@@ -155,12 +187,9 @@ local function build_content()
 
 	-- Footer
 	table.insert(lines, "")
-	table.insert(
-		lines,
-		"  ────────────────────────────────────────────────────────────────"
-	)
+	table.insert(lines, "  " .. string.rep("─", width - 2))
 	table.insert(lines, "")
-	table.insert(lines, "  Controls: <Enter> Open  •  d Delete  •  q Quit")
+	table.insert(lines, "  Controls: <Enter> Open  •  d Delete  •  / Search  •  q Quit")
 	table.insert(lines, "")
 
 	return lines
@@ -173,10 +202,11 @@ local function refresh()
 	end
 
 	state.recordings = load_recordings()
+	filter_recordings()
 
-	if #state.recordings > 0 then
-		if state.selected_idx > #state.recordings then
-			state.selected_idx = #state.recordings
+	if #state.filtered > 0 then
+		if state.selected_idx > #state.filtered then
+			state.selected_idx = #state.filtered
 		end
 		if state.selected_idx < 1 then
 			state.selected_idx = 1
@@ -194,14 +224,15 @@ local function refresh()
 	for i, line in ipairs(lines) do
 		local lnum = i - 1
 
-		if line:match("^  ▶") then
+		if line:match("^  ❯") then
 			vim.api.nvim_buf_add_highlight(state.buf, -1, "RecDashboardSelected", lnum, 0, -1)
 		end
 
 		if line:match("%[WIN%]") or line:match("%[FULL%]") then
 			local s, e = line:find("%[.-%]")
 			if s then
-				vim.api.nvim_buf_add_highlight(state.buf, -1, "RecDashboardMode", lnum, s - 1, e)
+				local hl = line:match("%[WIN%]") and "RecDashboardBadgeWin" or "RecDashboardBadgeFull"
+				vim.api.nvim_buf_add_highlight(state.buf, -1, hl, lnum, s - 1, e)
 			end
 		end
 
@@ -213,23 +244,27 @@ local function refresh()
 			vim.api.nvim_buf_add_highlight(state.buf, -1, "RecDashboardPath", lnum, 0, -1)
 		end
 
-		if line:match("^  [╭│╰]") or line:match("^  ──") then
+		if line:match("^  [┌└│]") or line:match("^  ──") then
 			vim.api.nvim_buf_add_highlight(state.buf, -1, "RecDashboardBorder", lnum, 0, -1)
 		end
 
 		if line:match("REC.NVIM") then
 			vim.api.nvim_buf_add_highlight(state.buf, -1, "RecDashboardTitle", lnum, 0, -1)
 		end
+
+		if line:match("Recordings Dashboard") then
+			vim.api.nvim_buf_add_highlight(state.buf, -1, "RecDashboardSubtitle", lnum, 0, -1)
+		end
 	end
 end
 
 ---@return table|nil
 local function get_selected()
-	if #state.recordings == 0 then
+	if #state.filtered == 0 then
 		return nil
 	end
-	if state.selected_idx > 0 and state.selected_idx <= #state.recordings then
-		return state.recordings[state.selected_idx]
+	if state.selected_idx > 0 and state.selected_idx <= #state.filtered then
+		return state.filtered[state.selected_idx]
 	end
 	return nil
 end
@@ -297,7 +332,7 @@ local function setup_keymaps()
 	local opts = { buffer = state.buf, noremap = true, silent = true }
 
 	vim.keymap.set("n", "j", function()
-		if state.selected_idx < #state.recordings then
+		if state.selected_idx < #state.filtered then
 			state.selected_idx = state.selected_idx + 1
 			refresh()
 		end
@@ -311,7 +346,7 @@ local function setup_keymaps()
 	end, opts)
 
 	vim.keymap.set("n", "<Down>", function()
-		if state.selected_idx < #state.recordings then
+		if state.selected_idx < #state.filtered then
 			state.selected_idx = state.selected_idx + 1
 			refresh()
 		end
@@ -326,6 +361,12 @@ local function setup_keymaps()
 
 	vim.keymap.set("n", "<CR>", open_recording, opts)
 	vim.keymap.set("n", "d", delete_recording, opts)
+	vim.keymap.set("n", "/", function()
+		local input = vim.fn.input("Search recordings: ", state.search_query or "")
+		state.search_query = input or ""
+		state.selected_idx = 1
+		refresh()
+	end, opts)
 
 	vim.keymap.set("n", "q", function()
 		M.close()
@@ -337,12 +378,14 @@ local function setup_keymaps()
 end
 
 local function setup_highlights()
-	vim.api.nvim_set_hl(0, "RecDashboardBorder", { fg = "#3b82f6" })
-	vim.api.nvim_set_hl(0, "RecDashboardTitle", { fg = "#60a5fa", bold = true })
-	vim.api.nvim_set_hl(0, "RecDashboardSelected", { fg = "#fbbf24", bold = true })
-	vim.api.nvim_set_hl(0, "RecDashboardMode", { fg = "#10b981" })
-	vim.api.nvim_set_hl(0, "RecDashboardDate", { fg = "#9ca3af" })
-	vim.api.nvim_set_hl(0, "RecDashboardPath", { fg = "#6b7280" })
+	vim.api.nvim_set_hl(0, "RecDashboardBorder", { fg = "#334155" })
+	vim.api.nvim_set_hl(0, "RecDashboardTitle", { fg = "#e2e8f0", bold = true })
+	vim.api.nvim_set_hl(0, "RecDashboardSubtitle", { fg = "#94a3b8" })
+	vim.api.nvim_set_hl(0, "RecDashboardSelected", { fg = "#f8fafc", bg = "#0f172a", bold = true })
+	vim.api.nvim_set_hl(0, "RecDashboardBadgeWin", { fg = "#22d3ee", bold = true })
+	vim.api.nvim_set_hl(0, "RecDashboardBadgeFull", { fg = "#f59e0b", bold = true })
+	vim.api.nvim_set_hl(0, "RecDashboardDate", { fg = "#94a3b8" })
+	vim.api.nvim_set_hl(0, "RecDashboardPath", { fg = "#64748b" })
 end
 
 function M.open()

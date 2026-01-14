@@ -96,6 +96,79 @@ fn next_output_file(dir: &Path) -> PathBuf {
     dir.join(format!("rec_{}.mp4", ts))
 }
 
+fn parse_screen_size(line: &str) -> Option<(i32, i32)> {
+    let mut parts = line.trim().split(',');
+    let w = parts.next()?.trim().parse::<i32>().ok()?;
+    let h = parts.next()?.trim().parse::<i32>().ok()?;
+    if w > 0 && h > 0 {
+        Some((w, h))
+    } else {
+        None
+    }
+}
+
+fn get_screen_size(input: &str) -> Option<(i32, i32)> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "avfoundation",
+            "-i",
+            input,
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(size) = parse_screen_size(line) {
+            return Some(size);
+        }
+    }
+
+    None
+}
+
+fn clamp_crop(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    screen_width: i32,
+    screen_height: i32,
+) -> Option<(i32, i32, i32, i32)> {
+    if screen_width <= 0 || screen_height <= 0 {
+        return None;
+    }
+
+    let cx = x.max(0);
+    let cy = y.max(0);
+    let mut cw = width.max(1);
+    let mut ch = height.max(1);
+
+    if cx >= screen_width || cy >= screen_height {
+        return None;
+    }
+
+    cw = cw.min(screen_width - cx);
+    ch = ch.min(screen_height - cy);
+
+    if cw <= 0 || ch <= 0 {
+        return None;
+    }
+
+    Some((cx, cy, cw, ch))
+}
+
 fn cmd_devices() -> anyhow::Result<()> {
     let status = Command::new("ffmpeg")
         .args(["-f", "avfoundation", "-list_devices", "true", "-i", ""])
@@ -137,6 +210,26 @@ fn cmd_start(
     write_log(&format!("Input: {}", input));
     write_log(&format!("Output: {}", output.display()));
 
+    let mut crop = None;
+    if let (Some(x), Some(y), Some(w), Some(h)) = (x, y, width, height) {
+        match get_screen_size(&input) {
+            Some((screen_w, screen_h)) => {
+                write_log(&format!(
+                    "Screen size: {}x{} (requested crop: {}x{} at {},{})",
+                    screen_w, screen_h, w, h, x, y
+                ));
+                if let Some((cx, cy, cw, ch)) = clamp_crop(x, y, w, h, screen_w, screen_h) {
+                    crop = Some((cx, cy, cw, ch));
+                } else {
+                    write_log("Crop invalid after clamping; skipping crop.");
+                }
+            }
+            None => {
+                write_log("Failed to get screen size; skipping crop.");
+            }
+        }
+    }
+
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -169,8 +262,8 @@ fn cmd_start(
         "-shortest",
     ]);
 
-    // Apply crop only if all values exist (RecWin)
-    if let (Some(x), Some(y), Some(w), Some(h)) = (x, y, width, height) {
+    // Apply crop only if all values exist and are safely clamped (RecWin)
+    if let Some((x, y, w, h)) = crop {
         let filter = format!("crop={}:{}:{}:{}", w, h, x, y);
         write_log(&format!("Crop filter: {}", filter));
         cmd.args(["-filter:v", &filter]);
@@ -251,4 +344,3 @@ Commands::Stop { .. } => cmd_stop()?,
 
     Ok(())
 }
-

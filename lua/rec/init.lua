@@ -171,73 +171,6 @@ local function close_windows()
 	state.keys_buf = nil
 end
 
-local function get_yabai_window_frame()
-	if vim.fn.executable("yabai") ~= 1 then
-		return nil, "yabai not found"
-	end
-
-	local out = vim.fn.system({ "yabai", "-m", "query", "--windows", "--window" })
-	if vim.v.shell_error ~= 0 then
-		return nil, "yabai query failed"
-	end
-
-	local ok, data = pcall(vim.json.decode, out)
-	if not ok or not data or not data.frame then
-		return nil, "invalid yabai json"
-	end
-
-	local f = data.frame
-	return {
-		x = math.floor(f.x),
-		y = math.floor(f.y),
-		width = math.floor(f.w),
-		height = math.floor(f.h),
-	}
-end
-
-function M.win()
-	if state.running then
-		notify("Already recording", vim.log.levels.WARN)
-		return
-	end
-
-	local frame, err = get_yabai_window_frame()
-	if not frame then
-		notify("RecWin failed: " .. (err or "unknown"), vim.log.levels.ERROR)
-		return
-	end
-
-	-- mark mode for dashboard/metadata (if you store it)
-	state.running = true
-	state.mode = "window"
-	state.start_time = os.time()
-
-	-- call rec-cli with crop args
-	run({
-		"start",
-		"--output-dir",
-		config.options.recording.output_dir,
-		"--x",
-		tostring(frame.x),
-		"--y",
-		tostring(frame.y),
-		"--width",
-		tostring(frame.width),
-		"--height",
-		tostring(frame.height),
-	})
-
-	open_hud()
-	open_keys()
-
-	state.timer = vim.loop.new_timer()
-	state.timer:start(0, 1000, vim.schedule_wrap(update_hud))
-
-	vim.on_key(on_key, state.key_ns)
-
-	notify("REC_START_OK (window)")
-end
-
 -- ---------- HUD update ----------
 
 local function update_hud()
@@ -420,7 +353,54 @@ function M.win(opts)
 		return
 	end
 
-	-- Get current window geometry
+	geometry.select_region({
+		winid = vim.api.nvim_get_current_win(),
+		on_done = function(geom)
+			if not geom then
+				notify("Window selection canceled", vim.log.levels.WARN)
+				return
+			end
+
+			-- Store geometry for potential use
+			state.capture_geometry = geom
+
+			-- Show preview if enabled (default: true)
+			local show_preview = opts.preview ~= false
+			local preview_duration = opts.preview_duration or 1500
+
+			if show_preview then
+				geometry.show_preview(geom, preview_duration)
+
+				notify(
+					string.format(
+						"Recording window: %dx%d at (%d,%d) - Starting in %.1fs...",
+						geom.width,
+						geom.height,
+						geom.x,
+						geom.y,
+						preview_duration / 1000
+					)
+				)
+
+				-- Delay start until preview is done
+				vim.defer_fn(function()
+					M.start_window_recording(geom)
+				end, preview_duration)
+			else
+				M.start_window_recording(geom)
+			end
+		end,
+	})
+end
+
+function M.fullwin(opts)
+	opts = opts or {}
+
+	if state.running then
+		notify("Already recording", vim.log.levels.WARN)
+		return
+	end
+
 	local geom = geometry.get_window_geometry()
 
 	if not geom then
@@ -428,10 +408,8 @@ function M.win(opts)
 		return
 	end
 
-	-- Store geometry for potential use
 	state.capture_geometry = geom
 
-	-- Show preview if enabled (default: true)
 	local show_preview = opts.preview ~= false
 	local preview_duration = opts.preview_duration or 1500
 
@@ -449,7 +427,6 @@ function M.win(opts)
 			)
 		)
 
-		-- Delay start until preview is done
 		vim.defer_fn(function()
 			M.start_window_recording(geom)
 		end, preview_duration)
@@ -696,6 +673,9 @@ function M.setup(opts)
 	config.setup(opts)
 
 	vim.api.nvim_create_user_command("RecStart", M.start, { desc = "Start fullscreen recording" })
+	vim.api.nvim_create_user_command("RecFullWin", function()
+		M.fullwin({ preview = true })
+	end, { desc = "Record full current window" })
 	vim.api.nvim_create_user_command("RecWin", function()
 		M.win({ preview = true })
 	end, { desc = "Record current window only" })

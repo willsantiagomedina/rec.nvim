@@ -278,4 +278,284 @@ function M.show_preview(geometry, duration_ms)
 	return win
 end
 
+local selection_state = {
+	active = false,
+	winid = nil,
+	mouse_save = nil,
+	selection_win = nil,
+	selection_buf = nil,
+	start_row = nil,
+	start_col = nil,
+	end_row = nil,
+	end_col = nil,
+	on_done = nil,
+}
+
+local function selection_cleanup()
+	if selection_state.selection_win and vim.api.nvim_win_is_valid(selection_state.selection_win) then
+		vim.api.nvim_win_close(selection_state.selection_win, true)
+	end
+	if selection_state.selection_buf and vim.api.nvim_buf_is_valid(selection_state.selection_buf) then
+		vim.api.nvim_buf_delete(selection_state.selection_buf, { force = true })
+	end
+
+	local map_opts = { silent = true, noremap = true }
+	pcall(vim.keymap.del, "n", "<LeftMouse>", map_opts)
+	pcall(vim.keymap.del, "n", "<LeftDrag>", map_opts)
+	pcall(vim.keymap.del, "n", "<LeftRelease>", map_opts)
+	pcall(vim.keymap.del, "n", "<Esc>", map_opts)
+
+	if selection_state.mouse_save ~= nil then
+		vim.o.mouse = selection_state.mouse_save
+	end
+
+	selection_state.active = false
+	selection_state.winid = nil
+	selection_state.mouse_save = nil
+	selection_state.selection_win = nil
+	selection_state.selection_buf = nil
+	selection_state.start_row = nil
+	selection_state.start_col = nil
+	selection_state.end_row = nil
+	selection_state.end_col = nil
+	selection_state.on_done = nil
+end
+
+local function selection_screen_pos()
+	local mouse = vim.fn.getmousepos()
+	if not mouse or mouse.winid ~= selection_state.winid then
+		return nil
+	end
+	return mouse.screenrow - 1, mouse.screencol - 1
+end
+
+local function selection_cursor_screen_pos()
+	local row, col = unpack(vim.api.nvim_win_get_cursor(selection_state.winid))
+	local win_pos = vim.api.nvim_win_get_position(selection_state.winid)
+	return win_pos[1] + (row - 1), win_pos[2] + col
+end
+
+local function clamp_screen_pos(row, col)
+	local max_row = math.max(0, vim.o.lines - 1)
+	local max_col = math.max(0, vim.o.columns - 1)
+	return math.min(max_row, math.max(0, row)), math.min(max_col, math.max(0, col))
+end
+
+local function selection_update_overlay(r1, c1, r2, c2)
+	local row = math.min(r1, r2)
+	local col = math.min(c1, c2)
+	local height = math.max(1, math.abs(r2 - r1) + 1)
+	local width = math.max(1, math.abs(c2 - c1) + 1)
+
+	if not selection_state.selection_buf or not vim.api.nvim_buf_is_valid(selection_state.selection_buf) then
+		selection_state.selection_buf = vim.api.nvim_create_buf(false, true)
+	end
+
+	if not selection_state.selection_win or not vim.api.nvim_win_is_valid(selection_state.selection_win) then
+		selection_state.selection_win = vim.api.nvim_open_win(selection_state.selection_buf, false, {
+			relative = "editor",
+			row = row,
+			col = col,
+			width = width,
+			height = height,
+			style = "minimal",
+			border = "rounded",
+			focusable = false,
+			zindex = 1000,
+		})
+
+		vim.api.nvim_set_hl(0, "RecSelectBorder", {
+			fg = "#22d3ee",
+			bold = true,
+		})
+		vim.api.nvim_set_option_value("winhl", "FloatBorder:RecSelectBorder", { win = selection_state.selection_win })
+		vim.api.nvim_set_option_value("winblend", 65, { win = selection_state.selection_win })
+	else
+		vim.api.nvim_win_set_config(selection_state.selection_win, {
+			relative = "editor",
+			row = row,
+			col = col,
+			width = width,
+			height = height,
+		})
+	end
+end
+
+local function selection_finish()
+	local row = math.min(selection_state.start_row, selection_state.end_row)
+	local col = math.min(selection_state.start_col, selection_state.end_col)
+	local height = math.max(1, math.abs(selection_state.end_row - selection_state.start_row) + 1)
+	local width = math.max(1, math.abs(selection_state.end_col - selection_state.start_col) + 1)
+
+	local cell_width, cell_height = get_cell_dimensions()
+	local nvim_x, nvim_y = get_nvim_window_position()
+
+	local geom = {
+		x = math.floor(nvim_x + (col * cell_width)),
+		y = math.floor(nvim_y + (row * cell_height)),
+		width = math.floor(width * cell_width),
+		height = math.floor(height * cell_height),
+	}
+
+	local cb = selection_state.on_done
+	selection_cleanup()
+
+	if cb then
+		cb(geom)
+	end
+end
+
+---Interactively select a capture region within the current window.
+---@param opts? table { winid?: number, on_done?: fun(geom: WindowGeometry|nil) }
+function M.select_region(opts)
+	opts = opts or {}
+	local winid = opts.winid or vim.api.nvim_get_current_win()
+	local on_done = opts.on_done
+
+	if not vim.api.nvim_win_is_valid(winid) then
+		if on_done then
+			on_done(nil)
+		end
+		return
+	end
+
+	if selection_state.active then
+		if on_done then
+			on_done(nil)
+		end
+		return
+	end
+
+	selection_state.active = true
+	selection_state.winid = winid
+	selection_state.mouse_save = vim.o.mouse
+	selection_state.on_done = on_done
+	vim.o.mouse = "a"
+
+	vim.notify(
+		"Drag to select. Use hjkl to resize, HJKL to move. Enter confirms, Esc cancels.",
+		vim.log.levels.INFO,
+		{ title = "rec.nvim" }
+	)
+
+	local map_opts = { silent = true, noremap = true }
+
+	vim.keymap.set("n", "<LeftMouse>", function()
+		local row, col = selection_screen_pos()
+		if not row or not col then
+			return
+		end
+		selection_state.start_row = row
+		selection_state.start_col = col
+		selection_state.end_row = row
+		selection_state.end_col = col
+		selection_update_overlay(row, col, row, col)
+	end, map_opts)
+
+	vim.keymap.set("n", "<LeftDrag>", function()
+		if not selection_state.start_row then
+			return
+		end
+		local row, col = selection_screen_pos()
+		if not row or not col then
+			return
+		end
+		selection_state.end_row = row
+		selection_state.end_col = col
+		selection_update_overlay(selection_state.start_row, selection_state.start_col, row, col)
+	end, map_opts)
+
+	vim.keymap.set("n", "<LeftRelease>", function()
+		if not selection_state.start_row then
+			return
+		end
+		local row, col = selection_screen_pos()
+		if row and col then
+			selection_state.end_row = row
+			selection_state.end_col = col
+			selection_update_overlay(selection_state.start_row, selection_state.start_col, row, col)
+		end
+		selection_finish()
+	end, map_opts)
+
+	local function ensure_selection()
+		if selection_state.start_row then
+			return
+		end
+		local row, col = selection_cursor_screen_pos()
+		row, col = clamp_screen_pos(row, col)
+		selection_state.start_row = row
+		selection_state.start_col = col
+		selection_state.end_row = row
+		selection_state.end_col = col
+		selection_update_overlay(row, col, row, col)
+	end
+
+	local function nudge_resize(dr, dc)
+		ensure_selection()
+		local row = selection_state.end_row + dr
+		local col = selection_state.end_col + dc
+		row, col = clamp_screen_pos(row, col)
+		selection_state.end_row = row
+		selection_state.end_col = col
+		selection_update_overlay(selection_state.start_row, selection_state.start_col, row, col)
+	end
+
+	local function nudge_move(dr, dc)
+		ensure_selection()
+		local sr = selection_state.start_row + dr
+		local sc = selection_state.start_col + dc
+		local er = selection_state.end_row + dr
+		local ec = selection_state.end_col + dc
+		sr, sc = clamp_screen_pos(sr, sc)
+		er, ec = clamp_screen_pos(er, ec)
+		selection_state.start_row = sr
+		selection_state.start_col = sc
+		selection_state.end_row = er
+		selection_state.end_col = ec
+		selection_update_overlay(sr, sc, er, ec)
+	end
+
+	vim.keymap.set("n", "h", function()
+		nudge_resize(0, -1)
+	end, map_opts)
+	vim.keymap.set("n", "j", function()
+		nudge_resize(1, 0)
+	end, map_opts)
+	vim.keymap.set("n", "k", function()
+		nudge_resize(-1, 0)
+	end, map_opts)
+	vim.keymap.set("n", "l", function()
+		nudge_resize(0, 1)
+	end, map_opts)
+
+	vim.keymap.set("n", "H", function()
+		nudge_move(0, -1)
+	end, map_opts)
+	vim.keymap.set("n", "J", function()
+		nudge_move(1, 0)
+	end, map_opts)
+	vim.keymap.set("n", "K", function()
+		nudge_move(-1, 0)
+	end, map_opts)
+	vim.keymap.set("n", "L", function()
+		nudge_move(0, 1)
+	end, map_opts)
+
+	vim.keymap.set("n", "<CR>", function()
+		if not selection_state.start_row then
+			return
+		end
+		selection_finish()
+	end, map_opts)
+
+	vim.keymap.set("n", "<Esc>", function()
+		local cb = selection_state.on_done
+		selection_cleanup()
+		if cb then
+			cb(nil)
+		end
+	end, map_opts)
+end
+
 return M
